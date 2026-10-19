@@ -80,7 +80,7 @@ class LightingEngine {
         this.running = false;
         this.activeSessionId = 0;
         this.activeProc = null;
-        this.lastWrittenZones = [null, null, null, null];
+        this.lastWrittenZones = [];
         this.currentConfig = null;
         this.screenSampleTimer = null;
         this.screenSampleColors = null;
@@ -102,22 +102,28 @@ class LightingEngine {
         this.screenSampleColors = null;
         this.audioRms = 0;
         this.audioPeak = 0;
-        this.lastWrittenZones = [null, null, null, null];
+        this.lastWrittenZones = [];
     }
 
     async _applyZones(zones, daemonCall, sessionId) {
         if (!this.running || sessionId !== this.activeSessionId) return;
         const target = zones.map(clampRgb);
+        const count = target.length;
+        if (count === 0) return;
+
+        if (!Array.isArray(this.lastWrittenZones) || this.lastWrittenZones.length !== count) {
+            this.lastWrittenZones = Array(count).fill(null);
+        }
 
         const allIdentical = target.every(c => colorsEqual(c, target[0]));
         if (allIdentical) {
             const allAlreadyWritten = this.lastWrittenZones.every(c => colorsEqual(c, target[0]));
             if (!allAlreadyWritten) {
                 await daemonCall("kb.zone.set", { rgb: target[0], zones: "all" });
-                for (let i = 0; i < 4; i++) this.lastWrittenZones[i] = [...target[0]];
+                for (let i = 0; i < count; i++) this.lastWrittenZones[i] = [...target[0]];
             }
         } else {
-            for (let i = 0; i < 4; i++) {
+            for (let i = 0; i < count; i++) {
                 if (!this.running || sessionId !== this.activeSessionId) break;
                 if (!colorsEqual(target[i], this.lastWrittenZones[i])) {
                     await daemonCall("kb.zone.set", { rgb: target[i], zones: String(i + 1) });
@@ -136,7 +142,7 @@ class LightingEngine {
 
             try {
                 const nextZones = updateFn(dt, now);
-                if (nextZones && Array.isArray(nextZones) && nextZones.length === 4) {
+                if (nextZones && Array.isArray(nextZones) && nextZones.length > 0) {
                     await this._applyZones(nextZones, daemonCall, sessionId);
                 }
             } catch (err) {
@@ -190,7 +196,7 @@ class LightingEngine {
         }
     }
 
-    _startScreenSampler(sessionId) {
+    _startScreenSampler(sessionId, zoneCount = 4) {
         const sampleOnce = () => {
             if (!this.running || sessionId !== this.activeSessionId) return;
             try {
@@ -198,7 +204,7 @@ class LightingEngine {
                     "-loglevel", "quiet",
                     "-f", "x11grab",
                     "-i", ":0.0",
-                    "-vf", "scale=4:1",
+                    "-vf", `scale=${zoneCount}:1`,
                     "-vframes", "1",
                     "-f", "rawvideo",
                     "-pix_fmt", "rgb24",
@@ -210,13 +216,12 @@ class LightingEngine {
                 proc.on("close", (code) => {
                     if (code === 0) {
                         const buf = Buffer.concat(chunks);
-                        if (buf.length >= 12) {
-                            this.screenSampleColors = [
-                                [buf[0], buf[1], buf[2]],
-                                [buf[3], buf[4], buf[5]],
-                                [buf[6], buf[7], buf[8]],
-                                [buf[9], buf[10], buf[11]]
-                            ];
+                        if (buf.length >= zoneCount * 3) {
+                            const sampled = [];
+                            for (let i = 0; i < zoneCount; i++) {
+                                sampled.push([buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2]]);
+                            }
+                            this.screenSampleColors = sampled;
                         }
                     }
                 });
@@ -233,6 +238,7 @@ class LightingEngine {
         const sessionId = ++this.activeSessionId;
         this.currentConfig = { ...config };
 
+        const zoneCount = Math.max(1, Math.min(4, Number(config.zoneCount || (Array.isArray(config.LEDs) && config.LEDs.length ? config.LEDs.length : 4)) || 4));
         const eff = String(config.effect || "").toUpperCase();
         const baseColor = clampRgb(config.color);
         const briScale = Math.max(0, Math.min(1, (config.brightness ?? 100) / 100));
@@ -247,7 +253,7 @@ class LightingEngine {
                     phase += dt * freq * Math.PI;
                     const factor = 0.2 + 0.8 * (0.5 * (1 + Math.sin(phase)));
                     const c = scaleRgb(baseColor, factor * briScale);
-                    return [c, c, c, c];
+                    return Array(zoneCount).fill(c);
                 });
                 break;
             }
@@ -258,8 +264,8 @@ class LightingEngine {
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     baseHue = (baseHue + (dir === 2 ? -1 : 1) * hueSpeed * dt + 360000) % 360;
                     const zones = [];
-                    for (let i = 0; i < 4; i++) {
-                        const offset = (dir === 2 ? -i : i) * 60;
+                    for (let i = 0; i < zoneCount; i++) {
+                        const offset = (dir === 2 ? -i : i) * (zoneCount > 1 ? 60 : 0);
                         const hue = (baseHue + offset + 360000) % 360;
                         zones.push(hsvToRgb(hue, 1.0, briScale));
                     }
@@ -276,8 +282,8 @@ class LightingEngine {
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     shiftPhase = (shiftPhase + (dir === 2 ? -1 : 1) * shiftSpeed * dt + 360000) % 360;
                     const zones = [];
-                    for (let i = 0; i < 4; i++) {
-                        const zoneOffset = (dir === 2 ? -i : i) * 35;
+                    for (let i = 0; i < zoneCount; i++) {
+                        const zoneOffset = (dir === 2 ? -i : i) * (zoneCount > 1 ? 35 : 0);
                         const h = (userHue + shiftPhase + zoneOffset + 360000) % 360;
                         zones.push(hsvToRgb(h, sat, briScale));
                     }
@@ -287,21 +293,20 @@ class LightingEngine {
             }
 
             case "METEOR": {
-                // Streak travels across zone 0 -> 1 -> 2 -> 3 (or 3 -> 0)
-                let pos = dir === 2 ? 4.0 : -1.0;
+                let pos = dir === 2 ? zoneCount : -1.0;
                 const meteorSpeed = 1.6 + speed * 0.9; // zones/sec
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     if (dir === 2) {
                         pos -= meteorSpeed * dt;
-                        if (pos < -2.0) pos = 4.0;
+                        if (pos < -2.0) pos = zoneCount;
                     } else {
                         pos += meteorSpeed * dt;
-                        if (pos > 5.0) pos = -1.0;
+                        if (pos > zoneCount + 1.0) pos = -1.0;
                     }
 
                     const zones = [];
                     const ambient = 0.08;
-                    for (let i = 0; i < 4; i++) {
+                    for (let i = 0; i < zoneCount; i++) {
                         const dist = dir === 2 ? (i - pos) : (pos - i);
                         let trail = 0;
                         if (dist >= 0 && dist < 2.5) {
@@ -319,9 +324,9 @@ class LightingEngine {
 
             case "TWINKLING": {
                 const ambient = 0.18;
-                const glints = [0, 0, 0, 0];
+                const glints = Array(zoneCount).fill(0);
                 this._runLoop(sessionId, daemonCall, (dt) => {
-                    for (let i = 0; i < 4; i++) {
+                    for (let i = 0; i < zoneCount; i++) {
                         if (glints[i] > 0) {
                             glints[i] = Math.max(0, glints[i] - dt * (1.2 + speed * 0.3));
                         } else if (Math.random() < (0.04 + speed * 0.02)) {
@@ -329,7 +334,7 @@ class LightingEngine {
                         }
                     }
                     const zones = [];
-                    for (let i = 0; i < 4; i++) {
+                    for (let i = 0; i < zoneCount; i++) {
                         const intensity = ambient + (1.0 - ambient) * glints[i];
                         let c = scaleRgb(baseColor, intensity * briScale);
                         if (glints[i] > 0.4) {
@@ -344,23 +349,21 @@ class LightingEngine {
             }
 
             case "SCREEN": {
-                this._startScreenSampler(sessionId);
-                let currentZones = [baseColor, baseColor, baseColor, baseColor];
+                this._startScreenSampler(sessionId, zoneCount);
+                let currentZones = Array(zoneCount).fill(baseColor);
                 let fallbackPhase = 0;
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     fallbackPhase = (fallbackPhase + dt * 60) % 360;
                     let targetZones = this.screenSampleColors;
-                    if (!targetZones) {
-                        // Smooth gradient fallback if display capture is inaccessible
-                        targetZones = [
-                            hsvToRgb(fallbackPhase, 0.8, 1.0),
-                            hsvToRgb((fallbackPhase + 60) % 360, 0.8, 1.0),
-                            hsvToRgb((fallbackPhase + 120) % 360, 0.8, 1.0),
-                            hsvToRgb((fallbackPhase + 180) % 360, 0.8, 1.0)
-                        ];
+                    if (!targetZones || targetZones.length !== zoneCount) {
+                        targetZones = [];
+                        for (let i = 0; i < zoneCount; i++) {
+                            const offset = zoneCount > 1 ? (i * 60) : 0;
+                            targetZones.push(hsvToRgb((fallbackPhase + offset) % 360, 0.8, 1.0));
+                        }
                     }
                     currentZones = currentZones.map((c, i) =>
-                        lerpColor(c, scaleRgb(targetZones[i], briScale), 0.35)
+                        lerpColor(c, scaleRgb(targetZones[i] || targetZones[0] || baseColor, briScale), 0.35)
                     );
                     return currentZones;
                 });
@@ -374,32 +377,39 @@ class LightingEngine {
                 const musicStyle = Number(config.music_effect || 1);
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     wavePhase = (wavePhase + dt * (60 + speed * 30)) % 360;
-                    // Audio monitor value with fallback subtle beat generator if audio is silent
                     simBeat = (simBeat + dt * 2.5) % (2 * Math.PI);
                     const fallbackAmp = 0.15 + 0.1 * Math.pow(Math.max(0, Math.sin(simBeat)), 4);
                     const amp = Math.max(this.audioRms, fallbackAmp);
 
                     const zones = [];
                     if (musicStyle === 1 || musicStyle === 8) {
-                        // Rainbow spectrum wave scaled by music amplitude
-                        for (let i = 0; i < 4; i++) {
-                            const h = (wavePhase + i * 60) % 360;
+                        for (let i = 0; i < zoneCount; i++) {
+                            const h = (wavePhase + i * (zoneCount > 1 ? 60 : 0)) % 360;
                             const zoneFactor = Math.min(1.0, (0.2 + 0.8 * amp));
                             zones.push(hsvToRgb(h, 1.0, zoneFactor * briScale));
                         }
                     } else if (musicStyle === 2 || musicStyle === 7) {
-                        // Dynamic hue shift: calm teal shifts to amber/red on heavy beats
                         const dynamicHue = (180 - amp * 160 + 360) % 360;
                         const factor = Math.min(1.0, 0.25 + 0.75 * amp);
                         const c = hsvToRgb(dynamicHue, 1.0, factor * briScale);
-                        return [c, c, c, c];
+                        return Array(zoneCount).fill(c);
                     } else {
-                        // Center-out visualizer beat bounce
-                        const centerAmp = Math.min(1.0, 0.2 + 0.8 * amp);
-                        const outerAmp = Math.min(1.0, 0.15 + 0.65 * this.audioPeak);
-                        const centerColor = scaleRgb(baseColor, centerAmp * briScale);
-                        const outerColor = scaleRgb(baseColor, outerAmp * briScale);
-                        return [outerColor, centerColor, centerColor, outerColor];
+                        if (zoneCount === 4) {
+                            const centerAmp = Math.min(1.0, 0.2 + 0.8 * amp);
+                            const outerAmp = Math.min(1.0, 0.15 + 0.65 * this.audioPeak);
+                            const centerColor = scaleRgb(baseColor, centerAmp * briScale);
+                            const outerColor = scaleRgb(baseColor, outerAmp * briScale);
+                            return [outerColor, centerColor, centerColor, outerColor];
+                        } else if (zoneCount === 3) {
+                            const centerAmp = Math.min(1.0, 0.2 + 0.8 * amp);
+                            const outerAmp = Math.min(1.0, 0.15 + 0.65 * this.audioPeak);
+                            const centerColor = scaleRgb(baseColor, centerAmp * briScale);
+                            const outerColor = scaleRgb(baseColor, outerAmp * briScale);
+                            return [outerColor, centerColor, outerColor];
+                        } else {
+                            const singleAmp = Math.min(1.0, 0.2 + 0.8 * amp);
+                            return [scaleRgb(baseColor, singleAmp * briScale)];
+                        }
                     }
                     return zones;
                 });
@@ -407,13 +417,12 @@ class LightingEngine {
             }
 
             default: {
-                // Default fallback: gentle breathing
                 let phase = 0;
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     phase += dt * Math.PI;
                     const factor = 0.2 + 0.8 * (0.5 * (1 + Math.sin(phase)));
                     const c = scaleRgb(baseColor, factor * briScale);
-                    return [c, c, c, c];
+                    return Array(zoneCount).fill(c);
                 });
                 break;
             }

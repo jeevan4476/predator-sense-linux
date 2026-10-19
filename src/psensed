@@ -714,7 +714,14 @@ class Daemon:
                 "wmi_dev": os.path.exists(PSWMI_DEV),
                 "socket": self.sock_path,
                 "curves": list(self.curves),
+                "product_name": read("/sys/class/dmi/id/product_name") or read("/sys/class/dmi/id/board_name") or "Acer Gaming Laptop",
+                "board_name": read("/sys/class/dmi/id/board_name") or "Unknown Board",
+                "sys_vendor": read("/sys/class/dmi/id/sys_vendor") or "Acer",
+                "bios_version": read("/sys/class/dmi/id/bios_version") or "Unknown BIOS",
+                "bios_date": read("/sys/class/dmi/id/bios_date") or "",
             }
+        if name == "sysinfo":
+            return self.op_sysinfo(args)
         if name == "fan.get":
             out = {f"rpm_{k}": v for k, v in self._read_temps()[0]["fans_rpm"].items()}
             for n in self.pwms:
@@ -722,8 +729,6 @@ class Daemon:
             out["pwm_available"] = self.pwms_ok
             out["curves"] = {f"fan{k}": v["points"] for k, v in self.curves.items()}
             return out
-        if name == "fan.reset":
-            return self._fan_write("mode", "auto", args.get("fan") or "both")
         if name == "fan.reset":
             return self._fan_write("mode", "auto", args.get("fan") or "both")
         if name == "fan.mode" or name == "fan.speed":
@@ -808,17 +813,26 @@ class Daemon:
             except ValueError:
                 return 0
 
-        bios_ver = dmi("bios_version") or ""
+        bios_ver = dmi("bios_version") or "Unknown BIOS"
         sw = bios_ver.split(".")
+        p_name = dmi("product_name") or dmi("board_name") or "Acer Gaming Laptop"
+        b_name = dmi("board_name") or "Unknown Board"
+        s_vendor = dmi("sys_vendor") or "Acer"
+        b_date = dmi("bios_date") or ""
+        p_family = dmi("product_family") or p_name
+
         out = {
-            "product": dmi("product_name") or "",
+            "product": p_name,
+            "product_name": p_name,
+            "product_family": p_family,
+            "board_name": b_name,
+            "sys_vendor": s_vendor,
             "serial": dmi("product_serial") or dmi("board_serial") or "",
             "uuid": dmi("product_uuid") or "",
-            "bios_vendor": dmi("bios_vendor") or "",
+            "bios_vendor": dmi("bios_vendor") or s_vendor,
             "bios_version": bios_ver,
-            "bios_date": dmi("bios_date") or "",
-            "board_name": dmi("board_name") or "",
-            "board_vendor": dmi("board_vendor") or "",
+            "bios_date": b_date,
+            "board_vendor": dmi("board_vendor") or s_vendor,
             "chid": dmi("product_sku") or "",
             "bios_major": sw[0].strip("Vv") if sw and sw[0].strip("Vv").isdigit() else "",
             "bios_minor": sw[1] if len(sw) > 1 else "",
@@ -1248,7 +1262,7 @@ class Daemon:
 
     def _dispatch(self, req):
         name = str(req.get("op", ""))
-        if name in ("sensors", "info", "fan.get", "fan.reset", "fan.mode", "fan.speed"):
+        if name in ("sensors", "info", "sysinfo", "fan.get", "fan.reset", "fan.mode", "fan.speed"):
             return self._misc(name, {k: v for k, v in req.items() if k != "op"})
         if name.startswith("profile.") or name.startswith("switchkey."):
             return self.op_profile(name, {k: v for k, v in req.items() if k != "op"})

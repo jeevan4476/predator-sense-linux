@@ -137,6 +137,34 @@ function machineId() {
     try { return fs.readFileSync("/etc/machine-id", "utf8").trim(); } catch { return "000"; }
 }
 
+function detectSystemModel() {
+    try {
+        const name = fs.readFileSync("/sys/class/dmi/id/product_name", "utf8").trim();
+        if (name) return name;
+    } catch {}
+    try {
+        const board = fs.readFileSync("/sys/class/dmi/id/board_name", "utf8").trim();
+        if (board) return board;
+    } catch {}
+    return "Acer Gaming Laptop";
+}
+
+function detectSystemFamily() {
+    try {
+        const fam = fs.readFileSync("/sys/class/dmi/id/product_family", "utf8").trim();
+        if (fam) return fam;
+    } catch {}
+    return detectSystemModel();
+}
+
+function detectSerialNumber() {
+    try {
+        const serial = fs.readFileSync("/sys/class/dmi/id/product_serial", "utf8").trim();
+        if (serial && !serial.toLowerCase().includes("default string")) return serial;
+    } catch {}
+    return null;
+}
+
 // get/set pairs are generated: getter-default comes from GET_DEFAULTS[kvKey]
 const KV_PAIRS = [
     // [kvKey, setFn, getFn, defaultGetterOrValue]
@@ -382,16 +410,19 @@ const HANDLERS = {
     info: {
         getAppVersion: () => "5.0.1463",
         getOEMSettings: () => OEM_SETTINGS(),
-        getSerialNumber: async () =>
-            (await daemonCall("sysinfo"))?.serial || "LNX" + machineId().slice(0, 12).toUpperCase(),
+        getSerialNumber: async () => {
+            const dmi = detectSerialNumber();
+            if (dmi) return dmi;
+            return (await daemonCall("sysinfo"))?.serial || "LNX" + machineId().slice(0, 12).toUpperCase();
+        },
         getSystemUuid: async () => {
             const si = await daemonCall("sysinfo");
             return si?.uuid ||
                 machineId().replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5") || machineId();
         },
         getMachineGuid: () => machineId(),
-        getSystemFamily: () => "Predator PHN16-71",
-        getSystemProductName: () => "Predator PHN16-71",
+        getSystemFamily: () => detectSystemFamily(),
+        getSystemProductName: () => detectSystemModel(),
         getSystemCPUName: () => "",
         getCountry: () => "",
         getLocaleCountryCode: () => (app.getLocaleCountryCode() || "US"),
@@ -1657,7 +1688,8 @@ async function applyLightingEntry(src) {
             brightness: bri,
             direction: dirNum,
             color: rgb,
-            music_effect: src.music_effect ?? src.musicEffect
+            music_effect: src.music_effect ?? src.musicEffect,
+            zoneCount: (Array.isArray(src.LEDs) && src.LEDs.length) ? src.LEDs.length : 4,
         }, daemonCall);
         return;
     }
@@ -1961,4 +1993,5 @@ process.on("SIGTERM", shutdown);
 module.exports = {
     dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown,
     lightingEngine, HANDLERS, setOverlayToggler, toggleOverlay, getLastMonitorData,
+    detectSystemModel, detectSystemFamily, detectSerialNumber,
 };
