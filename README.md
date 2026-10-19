@@ -34,40 +34,40 @@ Predator Sense Linux brings full hardware telemetry, thermal mode switching, adv
 
 ## Key Features
 
-###  Thermal & Performance Profiles
+### Thermal & Performance Profiles
 - **Instant Mode Switching**: Switch on-the-fly between **Eco**, **Quiet**, **Balanced**, **Performance**, and **Turbo** modes.
 - **Hardware ACPI WMI Integration**: Dispatches native vendor method calls to the Embedded Controller (EC) and aligns with kernel `platform-profile`.
 - **Physical Mode-Key Synchronization**: Hardware turbo switch button dynamically cycles modes or activates one-touch Turbo with desktop notifications.
 
-###  Pulsar Dynamic Lighting Engine
+### Pulsar Dynamic Lighting Engine
 - **Full RGB Suite**: Userspace frame-interpolation engine supporting **Breathing**, **Wave**, **Shifting**, **Meteor**, **Twinkling**, and **Static** color modes.
 - **Screen Mimic (Ambilight)**: Real-time screen sampling that projects edge display colors directly onto keyboard backlight zones for immersive gaming.
 - **Music & Audio Visualizer**: Live PipeWire audio spectrum analysis driving dynamic lighting intensity and frequency pulse effects.
 - **Hardware Safe**: Eliminates firmware lockouts and keyboard blackouts by pacing updates across zones with smooth software-interpolated transitions.
 
-###  Advanced Fan & Cooling Control
+### Advanced Fan & Cooling Control
 - **Triple Fan Monitoring**: Real-time RPM tracking for CPU, GPU, and Auxiliary cooling fans via ACPI WMI and hwmon interfaces.
 - **Fan Modes**: One-click **Auto**, **Max**, and **Custom Speed** controls (0–100% or absolute RPM).
 - **Userspace Temperature Curves**: Custom temperature-to-PWM fan curves with configurable hysteresis, preventing constant fan ramp-up noise during burst workloads.
 
-###  AI Zone & System Enhancements
+### AI Zone & System Enhancements
 - **AI Smart Battery Care**: Enforces battery longevity thresholds (stops charging at 80% capacity) directly at the EC level, preserving battery health when connected to AC power.
 - **Acer PurifiedVoice 2.0**: Linux neural AI noise cancellation integrating directly with PipeWire to filter out keystrokes, fan hum, and ambient room noise from your microphone.
 - **PurifiedView Quick Access**: Direct integration for camera studio lighting, eye contact framing, and background blur under Linux.
 - **Power-off USB Charging**: Toggle and configure charging thresholds for external devices via laptop USB ports while the system is powered down.
 
-###  Real-Time Hardware Diagnostics (`psense checkup`)
+### Real-Time Hardware Diagnostics (`psense checkup`)
 - **Battery Health & Wear**: Inspect design capacity, current full charge capacity, wear percentage, cycle count, and charging rate.
 - **NVMe SMART Diagnostics**: Live controller health, temperature, and wear monitoring via `smartctl`.
 - **System Memory Inspection**: Real-time DDR4/DDR5 clock speed, memory channel status, and RAM utilization via SMBIOS.
 
-###  In-Game Floating HUD & Desktop Integration
+### In-Game Floating HUD & Desktop Integration
 - **Compact Mini-Widget**: Translucent floating HUD overlay displaying live CPU/GPU temperatures, utilization, fan RPM, and active thermal profile.
 - **System Tray Companion**: Background tray icon with quick mode switching, fan override presets, and battery health indicators.
 - **Desktop OSD Notifications**: Non-intrusive notifications when changing thermal profiles via keyboard shortcuts or hotkeys.
 - **App & Game Auto-Switching**: Automatically binds specific games or high-performance processes to Performance or Turbo profiles upon launch.
 
-###  100% Offline & Zero Telemetry Privacy Guarantee
+### 100% Offline & Zero Telemetry Privacy Guarantee
 - **No Cloud Dependencies**: Acer account login dialogues and warranty registration prompts are neutralized in favor of a clean, local-only offline mode.
 - **Hardened Network Firewall**: Bundled Electron runtime intercepts and hard-blocks all network requests to Google Analytics, Firebase, and Acer tracking endpoints (`webRequest.onBeforeRequest`).
 - **Zero Diagnostics Uploaded**: No hardware identifiers, serial numbers, or usage metrics leave your machine.

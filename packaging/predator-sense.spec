@@ -206,7 +206,7 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
-* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-9
+* Mon Oct 19 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-9
 - psensed: BREATHING/SHIFTING/METEOR/TWINKLING (and NEON→SHIFTING alias) are
   now EC-native: one 16-B controller-layout frame per change, the EC animates
   autonomously — the userspace engine burned ~0.3 core feeding ~18 zone-write
@@ -221,7 +221,7 @@ depmod -a -F /boot/System.map-%{kver} %{kver} || :
 - psensed: kb.get state readout recalibrated to the live echo slot map
   ([1]=mode [2]=speed [3]=brightness [4]=dir [5..7]=frame RGB [6..8]=zone RGB)
 
-* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-8
+* Mon Oct 19 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-8
 - psensed: dedupe repeated kb.zone.set writes against an EC palette cache
   (animated frame storms from old/spawned GUI instances evaluated 1.15 SMM
   writes/s forever and burned 30-40% daemon CPU) with invalidation on
@@ -237,26 +237,26 @@ depmod -a -F /boot/System.map-%{kver} %{kver} || :
 - backend: advertise GPU mux capability 0 (no mux mechanism on this
   platform; the selector was a KV placebo)
 
-* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-7
+* Mon Oct 19 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-7
 - Align Linux architecture with Windows OEM reverse-engineered services
 - Move dynamic lighting animation engine (Wave, Breathing, Meteor, etc.) into psensed
 - Add 24/7 background lighting persistence across reboots with zero GUI dependency
 - Add psense kb effect CLI command for full terminal lighting control
 - Wire OEM profile GPU overclocking (+100MHz Core / +200MHz VRAM) on Turbo mode
 
-* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-6
+* Mon Oct 19 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-6
 - Fix EADDRINUSE 15150 crash by adding Electron single-instance locking
 - Auto-restore and focus existing window on second instance launch
 - Add pre-listen EADDRINUSE error guards on broker and agent servers
 
-* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-5
+* Mon Oct 19 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-5
 - Open-source preparation: 100% offline privacy shield, blocked telemetry
 - Neutralize Acer Account login and registration dead ends
 - Universal DMI hardware detection across Predator & Nitro models
 - Add psense checkup terminal diagnostic and psense ui launcher
 - Comprehensive open-source README and CONTRIBUTING documentation
 
-* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-4
+* Mon Oct 19 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-4
 - Fix adaptor and battery boost event payloads for seamless DC mode switching
 - Add userspace Pulsar Dynamic Lighting Engine for 4-zone RGB keyboards
 - Wire Power-off USB charging and battery threshold to WMI APGe
