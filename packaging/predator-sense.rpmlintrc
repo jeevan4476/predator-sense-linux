@@ -1,0 +1,59 @@
+# rpmlint configuration for the Predator Sense Linux packages.
+#
+# Every filter here corresponds to a finding that is inherent to the
+# product — a bundled third-party Electron payload carrying the stock Acer
+# renderer under /opt, or a kernel module shipping its mandatory symbol
+# table — or to a deliberate, documented packaging choice for this private,
+# single-machine install. Fixable defects are fixed in the sources/spec.
+
+# Technical vocabulary missing from rpmlint's dictionary:
+# Acer (brand), acer, wmi/WSMI, hwmon, psensed, RGB, SMBIOS...
+addFilter("spelling-error")
+
+# Bundled GUI payload (upstream npm/electron tree, kept byte-faithful):
+# npm metadata dirs and upstream-marked ""-x files without shebangs
+addFilter("hidden-file-or-dir")
+addFilter("script-without-shebang")
+addFilter("symlink-to-binary-with-shebang")
+addFilter("zero-length")
+# prebuilt Electron/Chromium binaries; not rebuildable on this machine
+addFilter("unstripped-binary-or-object")
+addFilter("binary-or-shlib-defines-rpath")
+addFilter("binary-or-shlib-calls-gethostbyname")
+addFilter("missing-call-to-setgroups-before-setuid")
+
+# LicenseRef-Proprietary is the SPDX-correct form for a private reference to
+# a non-SPDX license (the stock Acer renderer); rpmlint's ID list just
+# doesn't cover LicenseRef entries.
+addFilter("invalid-license LicenseRef-Proprietary")
+
+# The gui package carries library packages (alsa-lib, cups-libs, libdrm,
+# libxkbcommon...) explicitly because auto-requires are suppressed for the
+# bundled /opt payload (cross-arch musl loaders would produce unresolvable
+# auto-Requires); direct lib Requires are the standard bundled-runtime
+# pattern.
+addFilter("explicit-lib-dependency")
+
+# Kernel modules are relocatable ET_REL objects whose symbol table must
+# remain for relocations ("file" reports them "not stripped" for that
+# reason); debug info is already strip --strip-debug'ed away.
+addFilter("unstripped-binary-or-object")
+
+# Single-package kmod build for the RUNNING kernel, private install
+# (documented in the spec + kmod doc): by design not a kernel-* rpm.
+addFilter("kernel-modules-not-in-kernel-packages")
+
+# Main package: no compiled binaries on purpose — daemon+CLI are
+# stdlib-only Python; compiled bits live in the kmod and gui subpackages.
+addFilter("no-binary")
+
+# Source0 is a local tarball (repo-relative build), not a distro URI.
+addFilter("invalid-url Source0")
+
+# /opt is the FHS home of bundled third-party applications; the GUI is
+# exactly that (matches install.sh so both routes stay interchangeable).
+addFilter("dir-or-file-in-opt")
+
+# Internal helper utilities (psense-purified-voice, psense-ai-charging)
+addFilter("no-manual-page-for-binary psense-")
+

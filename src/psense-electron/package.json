@@ -1,0 +1,18 @@
+{
+  "name": "predator-sense-linux-electron",
+  "version": "5.0.1463",
+  "description": "Acer PredatorSense UI (original renderer) on Linux — ddsc shim maps window.ddsc.<module>.<func> to the local psensed daemon",
+  "main": "main.js",
+  "channel": "LinuxShim",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@electron/remote": "^2.1.3",
+    "aedes": "^0.46.3",
+    "electron": "^44.9.0",
+    "mqtt": "^4.3.7",
+    "websocket-stream": "^5.5.2"
+  }
+}

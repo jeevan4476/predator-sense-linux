@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /home/img1/projects/predator-sense-linux/.venv/bin/python /home/img1/projects/predator-sense-linux/src/psense-gui/main.py "$@"

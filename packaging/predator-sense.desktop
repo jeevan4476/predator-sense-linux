@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Predator Sense
+GenericName=Acer Predator control for Linux
+Comment=Profiles, fan control, RGB lighting and monitoring for Acer Predator / Nitro laptops
+Exec=predator-sense
+TryExec=predator-sense
+Icon=predator-sense
+Terminal=false
+Categories=System;Utility;Monitor;Settings;
+Keywords=predator;acer;fan;rgb;lighting;turbo;profile;
+StartupWMClass=PredatorSense
+X-GNOME-UsesNotifications=true
+NoDisplay=false

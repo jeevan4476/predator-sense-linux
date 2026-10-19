@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""psense — Acer Predator Sense control for Linux (PHN16-71 family).
+
+Thin CLI over the stock-kernel surfaces (platform-profile + acer hwmon).
+Works pre- and post- `acer_wmi.force_caps=0x1C26` unlock; it detects what
+is available and explains what is missing. Run as root for writes.
+
+Spec: ../spec/protocol.md   Ledger: ../analysis/wmi-methods.md
+"""
+
+import argparse
+import glob
+import json
+import os
+import socket
+import sys
+
+RESET = "auto"
+
+
+def find_acer_hwmon():
+    for h in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            if open(f"{h}/name").read().strip() == "acer":
+                return h
+        except OSError:
+            continue
+    return None
+
+
+def find_platform_profile():
+    for p in glob.glob("/sys/devices/platform/acer-wmi/platform-profile/platform-profile-*"):
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def read(path):
+    try:
+        return open(path).read().strip()
+    except OSError as e:
+        return None
+
+
+def write(path, value):
+    try:
+        open(path, "w").write(str(value))
+        return True
+    except OSError as e:
+        print(f"error: cannot write {path}: {e} (need root?)", file=sys.stderr)
+        return False
+
+
+# ---------------------------------------------------------------- sensors
+def cmd_sensors(_):
+    h = find_acer_hwmon()
+    if not h:
+        sys.exit("acer hwmon not found — is acer_wmi loaded?")
+    out = {
+        "fans_rpm": {
+            "cpu": read(f"{h}/fan1_input"),
+            "gpu": read(f"{h}/fan2_input"),
+        },
+        "temps": {p: read(f"{h}/{p}") for p in sorted(os.listdir(h)) if p.startswith("temp") and p.endswith("_input")},
+    }
+    print(json.dumps(out, indent=2))
+
+
+# ---------------------------------------------------------------- profile
+def cmd_profile(args):
+    p = find_platform_profile()
+    if not p:
+        sys.exit("platform-profile not found — is acer_wmi loaded with the platform cap?")
+    if args.action in ("get", None):
+        print(read(f"{p}/profile"))
+    elif args.action == "list":
+        print(read(f"{p}/choices"))
+    elif args.action == "set":
+        if not args.value:
+            sys.exit("usage: psense profile set <low-power|quiet|balanced|balanced-performance|performance>")
+        r = daemon_req({"op": "profile.set", "name": args.value})
+        if r is not None and "error" not in r:
+            print(f"profile set to {r.get('profile', args.value)}")
+            return
+        if r is not None and "error" in r:
+            sys.exit(f"daemon: {r['error']}")
+        choices = (read(f"{p}/choices") or "").split()   # no daemon -> direct write (root)
+        if args.value not in choices:
+            sys.exit(f"invalid choice {args.value!r}; choices: {choices}")
+        if write(f"{p}/profile", args.value):
+            print(f"profile set to {args.value}")
+
+
+# ---------------------------------------------------------------- fan
+PWM_ENABLE_MAP = {  # hwmon value -> firmware mode (kernel acer-wmi)
+    "turbo": 0,
+    "custom": 1,
+    "auto": 2,
+}
+ENABLE_NAME = {v: k for k, v in PWM_ENABLE_MAP.items()}
+
+
+def _pwm_nodes(h):
+    return sorted(glob.glob(f"{h}/pwm?"), key=lambda x: (len(x), x))
+
+
+# WMI-module fan verbs (daemon-only; direct sysfs has no equivalent)
+WMI_FAN_ACTIONS = {"wmode", "wspeed", "wget", "wmodes", "wtable"}
+
+
+def cmd_fan(args):
+    # WMI verbs go exclusively through psensed (the /dev/psense-wmi ioctl is
+    # root-only; no sysfs fallback exists for them).
+    if args.action in WMI_FAN_ACTIONS:
+        fan = args.fan or ("cpu" if args.action in ("wspeed", "wget") else "both")
+        op = {
+            "wmode":  {"op": "fan.wmode", "mode": args.value, "fan": fan},
+            "wspeed": {"op": "fan.wspeed", "pct": args.value, "fan": fan},
+            "wget":   {"op": "fan.wget", "fan": fan},
+            "wmodes": {"op": "fan.wmodes", "fan": fan},
+            "wtable": {"op": "fan.wtable"},
+        }[args.action]
+        r = daemon_req(op, args.sock if hasattr(args, "sock") else "/run/psense.sock", 20)
+        if r is None:
+            sys.exit(2)
+        print(json.dumps(r, indent=2))
+        if "error" in r:
+            sys.exit(1)
+        return
+
+    # Writes and rich status go through psensed when reachable (works for any
+    # wheel user); fall back to direct sysfs (needs root) when no daemon runs.
+    if args.action in ("status", "mode", "speed", "reset"):
+        if args.action == "status":
+            r = daemon_req({"op": "fan.get"})
+            if r is not None and "error" not in r:
+                out = {"rpm": {"cpu": r.get("rpm_cpu"), "gpu": r.get("rpm_gpu")},
+                       "pwm_supported": r.get("pwm_available"),
+                       "curves": r.get("curves", {})}
+                for k in ("fan1", "fan2"):
+                    if k in r:
+                        out[k] = r[k]
+                print(json.dumps(out, indent=2))
+                return
+        elif daemon_req({"op": "info"}) is not None:      # daemon reachable
+            if args.action == "mode":
+                op = {"op": "fan.mode", "mode": args.value, "fan": args.fan or "both"}
+            elif args.action == "speed":
+                op = {"op": "fan.speed", "pct": args.value, "fan": args.fan or "both"}
+            else:
+                op = {"op": "fan.reset"}
+            r = daemon_req(op)
+            if r is not None:
+                print(json.dumps(r, indent=2))
+                if "error" not in r:
+                    return
+                # daemon-level error: show and stop (direct sysfs would fail too)
+                sys.exit(1)
+            # daemon unreachable -> fall through to direct sysfs (root needed)
+        # ----- direct sysfs path (root required) -----
+        h = find_acer_hwmon()
+        if not h:
+            sys.exit("acer hwmon not found")
+        pwms = _pwm_nodes(h)
+        have_pwm = bool(pwms)
+        if args.action == "status":
+            nodes = {
+                "rpm": {"cpu": read(f"{h}/fan1_input"), "gpu": read(f"{h}/fan2_input")},
+                "pwm_supported": have_pwm,
+            }
+            if have_pwm:
+                for p in pwms:
+                    idx = p[-1]
+                    nodes[f"fan{idx}"] = {
+                        "pwm": read(p),
+                        "mode": ENABLE_NAME.get(read(f"{p}_enable"), read(f"{p}_enable")),
+                    }
+            print(json.dumps(nodes, indent=2))
+            if not have_pwm:
+                print("hint: per-fan control locked. unlock once with:\n"
+                      "  sudo bash tools/m1-fan-test.sh   # one-shot test + auto-restore\n"
+                      "  echo 'options acer_wmi force_caps=0x1C26' | sudo tee /etc/modprobe.d/acer-wmi.conf",
+                      file=sys.stderr)
+        elif args.action == "mode":
+            if not have_pwm:
+                sys.exit("pwm nodes not available — run the force_caps unlock first (see 'fan status' hint)")
+            if args.value not in PWM_ENABLE_MAP:
+                sys.exit("mode must be one of: auto | turbo | custom")
+            target = args.fan or "both"
+            for p in pwms:
+                idx = p[-1]
+                if target in ("both", "cpu") and idx == "1":
+                    rc = write(f"{p}_enable", PWM_ENABLE_MAP[args.value])
+                elif target in ("both", "gpu") and idx == "2":
+                    rc = write(f"{p}_enable", PWM_ENABLE_MAP[args.value])
+                else:
+                    continue
+                if rc:
+                    print(f"fan{idx} mode -> {args.value}")
+        elif args.action == "speed":
+            if not have_pwm:
+                sys.exit("pwm nodes not available — run the force_caps unlock first")
+            try:
+                pct = int(args.value)
+            except (TypeError, ValueError):
+                sys.exit("speed percent required, e.g.: psense fan speed 60 --fan cpu")
+            if not 0 <= pct <= 100:
+                sys.exit("percent must be 0..100")
+            target = args.fan or "both"
+            val = round(pct * 255 / 100)
+            for p in pwms:
+                idx = p[-1]
+                if (target in ("both", "cpu") and idx == "1") or (target in ("both", "gpu") and idx == "2"):
+                    if write(f"{p}_enable", PWM_ENABLE_MAP["custom"]) and write(p, val):
+                        print(f"fan{idx} custom speed -> {pct}% (pwm {val})")
+        else:  # reset
+            for p in pwms:
+                if write(f"{p}_enable", PWM_ENABLE_MAP["auto"]):
+                    print(f"fan{p[-1]} mode -> auto (firmware)")
+        return
+
+    # sweep: calibration helper, direct sysfs only (root)
+    h = find_acer_hwmon()
+    if not h:
+        sys.exit("acer hwmon not found")
+    pwms = _pwm_nodes(h)
+    if not pwms:
+        sys.exit("pwm nodes not available")
+    fan = args.fan or "cpu"
+    node = pwms[0] if fan == "cpu" else pwms[-1]
+    rpm = "fan1_input" if fan == "cpu" else "fan2_input"
+    write(f"{node}_enable", PWM_ENABLE_MAP["custom"])
+    try:
+        for pct in range(int(args.start), int(args.stop) + 1, int(args.step)):
+            write(node, round(pct * 255 / 100))
+            print(f"{pct}% pwm={round(pct*255/100)} rpm={read(f'{h}/{rpm}')}", flush=True)
+    finally:
+        write(f"{node}_enable", PWM_ENABLE_MAP["auto"])
+
+
+# ---------------------------------------------------------------- curve
+def daemon_req(op, sock="/run/psense.sock", timeout=5):
+    """One-shot JSON request to psensed."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(sock)
+        s.sendall((json.dumps(op) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        return json.loads(data.decode())
+    except FileNotFoundError:
+        print(f"daemon not running (socket {sock} missing). start: sudo src/psensed", file=sys.stderr)
+    except (ConnectionRefusedError, socket.timeout, OSError) as e:
+        print(f"daemon request failed: {e}", file=sys.stderr)
+    return None
+
+
+def cmd_curve(args):
+    fan = args.fan or "cpu"
+    if args.action == "show":
+        r = daemon_req({"op": "fan.curve.get"}, args.sock)
+        print(json.dumps(r, indent=2) if r is not None else None)
+    elif args.action == "set":
+        if not args.points or len(args.points.split()) < 2:
+            sys.exit('points format: "<temp°>:<pct> …" e.g. "40:25 60:45 80:70 90:100"')
+        r = daemon_req({"op": "fan.curve.set", "fan": fan, "points": args.points}, args.sock)
+        print(json.dumps(r, indent=2) if r is not None else None)
+    elif args.action == "clear":
+        r = daemon_req({"op": "fan.curve.clear", "fan": fan}, args.sock)
+        print(json.dumps(r, indent=2) if r is not None else None)
+
+
+# ---------------------------------------------------------------- info
+def cmd_info(_):
+    dmi = read("/sys/class/dmi/id/product_name")
+    info = {
+        "dmi_product": dmi,
+        "kernel": read("/proc/sys/kernel/osrelease"),
+        "acer_hwmon": find_acer_hwmon(),
+        "platform_profile": find_platform_profile(),
+        "pwm_available": bool(_pwm_nodes(find_acer_hwmon() or "")),
+        "wmi_devices": sorted(os.path.basename(d) for d in glob.glob("/sys/bus/wmi/devices/*")),
+    }
+    print(json.dumps(info, indent=2))
+
+
+# ---------------------------------------------------------------- keyboard (WMI)
+# EC effect-id space shared by keyboard/strips (binary consensus, ledger §13.14.6)
+KB_MODES = {"static": 0, "breathing": 1, "neon": 2, "wave": 3, "shifting": 4, "meteor": 6,
+            "twinkling": 7, "direct": 0xFF}
+def cmd_kb(args):
+    daemon_req({"op": "info"})  # warm error message if daemon is missing
+    if args.action == "get":
+        op = {"op": "kb.get"}
+    elif args.action == "restore":
+        op = {"op": "kb.restore"}
+    elif args.action == "zone":
+        try:
+            rgb = [int(x) for x in (args.rgb or "0,0,0").split(",", 2)]
+        except ValueError:
+            sys.exit('rgb format: "R,G,B"')
+        op = {"op": "kb.zone.set", "zones": args.zones or "all", "rgb": rgb}
+    else:  # set
+        if args.mode is None:
+            sys.exit("kb set <mode-id|static|breathing|neon|wave|shifting|meteor|twinkling|direct> required")
+        try:
+            if isinstance(args.mode, str) and args.mode.lower() in KB_MODES:
+                mode = KB_MODES[args.mode.lower()]
+            else:
+                mode = int(args.mode)
+        except ValueError:
+            sys.exit("mode must be an int or one of " + ", ".join(KB_MODES))
+        try:
+            rgb = [int(x) for x in (args.rgb or "255,0,0").split(",", 2)]
+        except ValueError:
+            sys.exit('rgb format: "R,G,B"')
+        op = {"op": "kb.set", "mode": mode, "rgb": rgb,
+              "speed": args.speed, "brightness": args.brightness,
+              "dir": args.dir, "device": args.device}
+    r = daemon_req(op, args.sock, 20)
+    if r is None:
+        sys.exit(2)
+    print(json.dumps(r, indent=2))
+    if "error" in r:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------- wmi raw
+def cmd_wmi(args):
+    op = {"op": "wmi.raw", "guid": args.guid, "mid": args.mid, "out_len": args.out}
+    if args.in_hex:
+        op["in"] = args.in_hex
+    r = daemon_req(op, args.sock, 20)
+    if r is None:
+        sys.exit(2)
+    print(json.dumps(r, indent=2))
+    if "error" in r:
+        sys.exit(1)
+
+
+BATT_MODES = {"optimized": 0, "full": 1, "adaptive": 2}
+
+
+def cmd_battmode(args):
+    """Battery charge mode (CareCenter BatteryHealthy; ledger §13.25).
+    Read-only GET needs root only inside the daemon; SET changes the EC's
+    charging behaviour (hardware-persistent) — user-initiated on purpose."""
+    op = {"op": "battmode.get"} if (args.action == "get") else {"op": "battmode.set"}
+    if args.action == "set":
+        if args.value is None:
+            sys.exit("battmode set <0|1|2|optimized|full|adaptive> required")
+        try:
+            op["value"] = BATT_MODES[str(args.value).lower()] \
+                if str(args.value).lower() in BATT_MODES else int(args.value)
+        except ValueError:
+            sys.exit("value must be an int or one of " + ", ".join(BATT_MODES))
+        if not (0 <= op["value"] <= 2):
+            sys.exit("value must be 0 (optimized), 1 (full) or 2 (adaptive)")
+    r = daemon_req(op, args.sock, 20)
+    if r is None:
+        sys.exit(2)
+    print(json.dumps(r, indent=2))
+    if r.get("error"):
+        sys.exit(1)
+
+
+def cmd_usbcharge(args):
+    """Power-off USB charge (QuickAccess USBChargeSwitch / USBCharge; ledger §13.29).
+    Read-only GET needs root only inside the daemon; SET changes EC USB charge
+    state and battery threshold (10%, 20%, 30%)."""
+    if args.action == "get":
+        op = {"op": "usbcharge.get"}
+    else:
+        op = {"op": "usbcharge.set"}
+        if args.value is not None:
+            v = str(args.value).lower().rstrip("%")
+            if v in ("on", "enable", "enabled", "true", "1"):
+                op["enabled"] = True
+            elif v in ("off", "disable", "disabled", "false", "0"):
+                op["enabled"] = False
+            elif v in ("10", "20", "30"):
+                op["threshold"] = int(v)
+            else:
+                sys.exit("value must be on|off or 10|20|30")
+        if args.threshold is not None:
+            if args.threshold not in (10, 20, 30):
+                sys.exit("--threshold must be 10, 20, or 30")
+            op["threshold"] = args.threshold
+        if "enabled" not in op and "threshold" not in op:
+            sys.exit("usbcharge set <on|off|10|20|30> [--threshold 10|20|30] required")
+    r = daemon_req(op, args.sock, 20)
+    if r is None:
+        sys.exit(2)
+    print(json.dumps(r, indent=2))
+    if r.get("error"):
+        sys.exit(1)
+
+
+def cmd_switchkey(args):
+    sock = getattr(args, "sock", "/run/psense.sock")
+    if args.action == "get":
+        res = daemon_req({"op": "switchkey.get"}, sock=sock)
+        if "error" in res:
+            sys.exit(f"error: {res['error']}")
+        mode = res.get("mode", 0)
+        print("cycle" if mode == 0 else "turbo")
+    elif args.action == "set":
+        val = args.value
+        if not val:
+            sys.exit("value required: cycle or turbo")
+        mode = 0 if val.lower() in ("0", "cycle", "cycleswitch") else 1
+        res = daemon_req({"op": "switchkey.set", "mode": mode}, sock=sock)
+        if res.get("status") != 0:
+            sys.exit(f"error: {res.get('error', 'set failed')}")
+        print(f"mode switch key -> {'cycle' if mode == 0 else 'turbo'}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="psense", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("sensors", help="fan rpm + temperatures (JSON)")
+    sub.add_parser("info", help="platform/tooling state (JSON)")
+
+    p = sub.add_parser("profile", help="thermal profile get|list|set")
+    p.add_argument("action", nargs="?", choices=["get", "list", "set"], default="get")
+    p.add_argument("value", nargs="?", default=None)
+
+    p = sub.add_parser("fan", help="fan status|mode|speed|reset|sweep + wmode|wspeed|wget|wmodes|wtable")
+    p.add_argument("action", choices=["status", "mode", "speed", "reset", "sweep",
+                                      "wmode", "wspeed", "wget", "wmodes", "wtable"])
+    p.add_argument("value", nargs="?", default=None)
+    p.add_argument("--fan", choices=["cpu", "gpu", "both"], default=None)
+    p.add_argument("--start", default=20)
+    p.add_argument("--stop", default=100)
+    p.add_argument("--step", default=10)
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    p = sub.add_parser("kb", help="keyboard backlight via psensed: get|zone|set|restore")
+    p.add_argument("action", choices=["get", "zone", "set", "restore"], default="get", nargs="?")
+    p.add_argument("mode", nargs="?", default=None, help="kb set: mode id or name (static|breathing|neon|wave|shifting|meteor|twinkling|direct)")
+    p.add_argument("--rgb", default=None, help='"R,G,B"')
+    p.add_argument("--zones", default=None, help='kb zone(s): "1,2,3,4" or "all" (zone)')
+    p.add_argument("--speed", default=0, help="kb set: effect speed (int)")
+    p.add_argument("--brightness", default=100, metavar="N",
+                   help="kb set: register brightness 0..255 (their UI 0..5 ×20)")
+    p.add_argument("--dir", default=0, help="kb set: direction, 0-based (int)")
+    p.add_argument("--device", default=1, help="kb set: device byte, 1=kb (int)")
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    p = sub.add_parser("wmi", help="raw whitelisted WMI eval via psensed")
+    p.add_argument("guid", choices=["gaming", "apge", "battery", "generic"])
+    p.add_argument("mid", type=int, help="WmiMethodId")
+    p.add_argument("in_hex", nargs="?", default=None, help="input bytes as hex")
+    p.add_argument("--out", type=int, default=64, help="output buffer size")
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    p = sub.add_parser("curve", help="userspace temp→pct curves via psensed: show|set|clear")
+    p.add_argument("action", choices=["show", "set", "clear"])
+    p.add_argument("--fan", choices=["cpu", "gpu"], default="cpu")
+    p.add_argument("--points", default=None, help='"40:25 60:45 80:70 90:100"')
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    p = sub.add_parser("battmode", help="battery charge mode: get|set (misc opcode 0x02)")
+    p.add_argument("action", choices=["get", "set"], nargs="?", default="get")
+    p.add_argument("value", nargs="?", default=None,
+                   help="set: 0|1|2 or optimized|full|adaptive")
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    p = sub.add_parser("usbcharge", help="power-off USB charge: get|set (APGeAction 0x04)")
+    p.add_argument("action", choices=["get", "set"], nargs="?", default="get")
+    p.add_argument("value", nargs="?", default=None,
+                   help="set: on|off or 10|20|30")
+    p.add_argument("--threshold", type=int, choices=[10, 20, 30], default=None,
+                   help="battery limit %% (10, 20, 30)")
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    p = sub.add_parser("switchkey", help="physical mode switch key behavior: get|set (cycle|turbo)")
+    p.add_argument("action", choices=["get", "set"], nargs="?", default="get")
+    p.add_argument("value", nargs="?", choices=["cycle", "turbo", "0", "1"], default=None)
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    args = ap.parse_args()
+    {"sensors": cmd_sensors, "info": cmd_info, "profile": cmd_profile, "fan": cmd_fan,
+     "curve": cmd_curve, "kb": cmd_kb, "wmi": cmd_wmi, "battmode": cmd_battmode,
+     "usbcharge": cmd_usbcharge, "switchkey": cmd_switchkey}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

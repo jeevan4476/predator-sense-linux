@@ -1,0 +1,60 @@
+.\" Predator Sense Linux
+.TH PSENSE 1 "2026-10-18" "predator-sense 5.0.1463" "User Commands"
+.SH NAME
+psense \- CLI client for the Predator Sense Linux daemon
+.SH SYNOPSIS
+.B psense
+.I subcommand
+.RI [ arguments ]
+.SH DESCRIPTION
+CLI client for
+.BR psensed (8).
+All commands talk JSON over the daemon unix socket
+.IR /run/psense.sock ,
+which is owned root:wheel 0660 \- wheel users run this CLI without sudo.
+All privileged EC/WMI work happens in the daemon, never in the CLI.
+.SH SUBCOMMANDS
+.TP
+.B sensors
+Fan RPM and temperatures as JSON (hwmon-sourced, 2 s cache).
+.TP
+.B info
+Platform/tooling state: DMI product, kernel, hwmon and WMI device inventory.
+.TP
+.B profile get | list | set NAME
+Thermal/scenario profile (maps to the platform-profile sysfs and the
+Acer gaming-scenario WMI surface).
+.TP
+.B fan status | mode | speed | reset | sweep
+HWmon fan control (per-fan mode/pwm via acer\-wmi force_caps).
+.TP
+.BI fan " wmode ID | wspeed " FAN " PCT | wget | wmodes | wtable"
+WMI fan-table surface (raw percent/level writes, raw table read).
+.TP
+.B fan curve set --fan FAN --points "T:P ..."
+.B / fan curve show | clear
+Userspace temp\(enpercent curves with hysteresis, interpreted by the daemon.
+.TP
+.B kb get | zone I R,G,B | set LIGHTMODE BRIGHTNESS --rgb R,G,B
+Keyboard backlight and per-zone colors via the WMI keyboard surface.
+.TP
+.B battmode get | set MODE
+Battery charge mode via the BatteryControl WMI surface (GUID begins
+79772EC5; see spec/protocol.md §5 in the source tree).  Modes: optimized,
+full, adaptive (adaptive is rejected by the EC on this machine and
+reported honestly, never faked).
+.TP
+.BI wmi " GUID_TAG MID [HEXBYTES] [\-\-out N]"
+Raw whitelisted WMI method call through the daemon (allow-masked by
+GUID and method id \- undocumented vendor surfaces are not callable).
+.SH FILES
+.TP
+.I /run/psense.sock
+daemon JSON API socket
+.SH SEE ALSO
+.BR psensed (8),
+.BR predator-sense (1)
+.SH BUGS
+Adaptive/AI\-Smart charging is hidden on machines where the EC rejects the
+adaptive function (reported honestly, not silently ignored).  Send issues
+against the predator\-sense\-linux project.

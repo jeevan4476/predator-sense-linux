@@ -1,0 +1,37 @@
+.\" Predator Sense Linux
+.TH PREDATOR-SENSE 1 "2026-10-18" "predator-sense 5.0.1463" "User Commands"
+.SH NAME
+predator-sense \- exact-clone of Acer Predator Sense GUI for Linux
+.SH SYNOPSIS
+.B predator-sense
+.RI [ electron-args... ]
+.SH DESCRIPTION
+Launches the GUI: the stock Acer Predator Sense renderer (Electron/Angular,
+taken from the vendor installer) talking to a Linux service shim
+(psense-electron main.js/backend.js) that implements the vendor MQTT/ddsc
+packet service against
+.BR psensed (8).
+Pages verified on PHN16\-71: Home (live metrics), Scenario profiles,
+Personal Settings \(em Battery & Charge (charge mode cards),
+Checkup (battery/storage honest checks, RAM check honestly fails),
+System Info (populated from /sys + SMBIOS), Monitoring, App Center
+(XDG app launch), full lighting control (keyboard backlight palette,
+zone colors, boot apply).
+.SH ENVIRONMENT
+.TP
+.B PS_SHOT / PS_CLICKS
+Debug capture harness (development only — write PNGs and scripted clicks to
+./debug next to the app).  Leave unset for normal use.
+.SH FILES
+.TP
+.I /opt/predator-sense/
+the app (original renderer + node_modules + shim) installed by the rpm
+.TP
+.I ~/.config/predator-sense-linux-*.json
+per-user state (lighting profile, tutorial flags, LaunchApp list)
+.TP
+.I /usr/share/applications/predator-sense.desktop
+menu entry (icon from /usr/share/icons/hicolor/256x256/apps/)
+.SH SEE ALSO
+.BR psensed (8),
+.BR psense (1)
