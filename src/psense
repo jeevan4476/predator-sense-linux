@@ -309,12 +309,14 @@ def parse_color(val):
         if len(parts) != 3 or any(not (0 <= x <= 255) for x in parts):
             raise ValueError('RGB components must be 0..255 (e.g. "0,255,200")')
         return parts
+    if len(val) == 3:
+        val = "".join(c * 2 for c in val)
     if len(val) == 6:
         try:
             return [int(val[i:i+2], 16) for i in (0, 2, 4)]
         except ValueError:
             raise ValueError(f"invalid hex string {val!r}")
-    raise ValueError('color must be hex (e.g. "00ffcc", "#00ffcc") or "R,G,B" (e.g. "0,255,200")')
+    raise ValueError('color must be hex (e.g. "00ffcc", "#00ffcc", "#0fc") or "R,G,B" (e.g. "0,255,200")')
 
 
 def cmd_kb(args):
@@ -450,7 +452,19 @@ def cmd_kb(args):
             sys.exit('rgb format: "R,G,B"')
         speed = int(args.speed) if args.speed is not None else 0
         brightness = int(args.brightness) if args.brightness is not None else 100
-        dir_val = int(args.dir) if args.dir is not None else 0
+        if args.dir is not None:
+            dir_str = str(args.dir).lower()
+            if dir_str in ("2", "left"):
+                dir_val = 2
+            elif dir_str in ("1", "right"):
+                dir_val = 1
+            else:
+                try:
+                    dir_val = int(args.dir)
+                except ValueError:
+                    dir_val = 0
+        else:
+            dir_val = 0
         op = {"op": "kb.set", "mode": mode, "rgb": rgb,
               "speed": speed, "brightness": brightness,
               "dir": dir_val, "device": args.device}

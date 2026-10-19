@@ -116,6 +116,10 @@ install -d %{buildroot}%{_prefix}/lib/predator-sense
 install -Dm644 src/psensed_lighting.py %{buildroot}%{_prefix}/lib/predator-sense/psensed_lighting.py
 install -Dm644 src/psensed_gpu_oc.py   %{buildroot}%{_prefix}/lib/predator-sense/psensed_gpu_oc.py
 
+# ---------- OEM model hardware profiles ----------
+install -d %{buildroot}%{_datadir}/predator-sense/models
+install -Dm644 packaging/models/*.ini %{buildroot}%{_datadir}/predator-sense/models/
+
 # ---------- systemd unit ----------
 install -Dm644 packaging/psensed.service %{buildroot}%{_unitdir}/psensed.service
 
@@ -166,6 +170,9 @@ test -s packaging/predator-sense-icon.png
 %{_sbindir}/psensed
 %dir %{_prefix}/lib/predator-sense
 %{_prefix}/lib/predator-sense/*
+%dir %{_datadir}/predator-sense
+%dir %{_datadir}/predator-sense/models
+%{_datadir}/predator-sense/models/*.ini
 %{_unitdir}/psensed.service
 %{_mandir}/man1/psense.1*
 %{_mandir}/man8/psensed.8*

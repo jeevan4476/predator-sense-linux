@@ -149,7 +149,9 @@ def _u64(*bytevals):
 class WmiCtl:
     """Thin ctypes wrapper around the PSWMI_EVAL ioctl."""
 
-    last_family = None   # guid of the last eval (worker thread only)
+    _lock = threading.Lock()
+    last_family = None   # guid of the last eval
+    last_mid = None      # method id of the last eval
     last_eval_t = 0.0    # monotonic time of the last eval
 
     def __init__(self, path=PSWMI_DEV):
@@ -165,27 +167,33 @@ class WmiCtl:
         """Returns (status, data); raises OSError when the module is missing.
         Cross-family guard: a switch between GUID families close on the heels
         of the previous eval stalls inside the SMM for 5-22 s (ledger §13.27)
-        — wait out a short gap first (all evals run on the worker thread)."""
+        — wait out a short gap first. Method 6 successive writes use WRITE_GAP
+        (30ms, Acer firmware pacing) for high-FPS dynamic lighting."""
         if guid not in GUID_SLOTS:
             raise ValueError(f"unknown guid slot {guid!r}")
-        now = time.monotonic()
-        wait = EVAL_GAP - (now - WmiCtl.last_eval_t)
-        if WmiCtl.last_family not in (None, guid):
-            wait = max(wait, FAMILY_GAP)
-        if wait > 0:
-            time.sleep(wait)          # SMM defers near-simultaneous evals to
-                                      # its next periodic window (5-22 s!)
-        fd = self._open()
-        inb = bytes(in_bytes)
-        ib = ctypes.create_string_buffer(inb, max(len(inb), 1))
-        ob = ctypes.create_string_buffer(out_len if out_len else 1)
-        req = bytearray(struct.pack(EVAL_FMT, GUID_SLOTS[guid], mid, len(inb), out_len,
-                                    0, 0, ctypes.addressof(ib), ctypes.addressof(ob), 0))
-        fcntl.ioctl(fd, EVAL_IOCTL, req, True)
-        _, _, _, _, out_used, _, _, _, status = struct.unpack(EVAL_FMT, bytes(req))
-        data = ob.raw[:min(out_used, out_len)] if out_len else b""
-        WmiCtl.last_family, WmiCtl.last_eval_t = guid, time.monotonic()
-        return status, data
+        with self._lock:
+            now = time.monotonic()
+            if guid == "gaming" and mid == 6 and WmiCtl.last_family == "gaming" and WmiCtl.last_mid == 6:
+                target_gap = WRITE_GAP
+            else:
+                target_gap = EVAL_GAP
+            wait = target_gap - (now - WmiCtl.last_eval_t)
+            if WmiCtl.last_family not in (None, guid):
+                wait = max(wait, FAMILY_GAP)
+            if wait > 0:
+                time.sleep(wait)          # SMM defers near-simultaneous evals to
+                                          # its next periodic window (5-22 s!)
+            fd = self._open()
+            inb = bytes(in_bytes)
+            ib = ctypes.create_string_buffer(inb, max(len(inb), 1))
+            ob = ctypes.create_string_buffer(out_len if out_len else 1)
+            req = bytearray(struct.pack(EVAL_FMT, GUID_SLOTS[guid], mid, len(inb), out_len,
+                                        0, 0, ctypes.addressof(ib), ctypes.addressof(ob), 0))
+            fcntl.ioctl(fd, EVAL_IOCTL, req, True)
+            _, _, _, _, out_used, _, _, _, status = struct.unpack(EVAL_FMT, bytes(req))
+            data = ob.raw[:min(out_used, out_len)] if out_len else b""
+            WmiCtl.last_family, WmiCtl.last_mid, WmiCtl.last_eval_t = guid, mid, time.monotonic()
+            return status, data
 
 
 def read(path):
@@ -576,6 +584,9 @@ class Daemon:
                 elif op == "kb.zone.set":
                     res = self.op_wmi("kb.zone.set", s_args)
                     return {"status": 0, "restored": True, "op": op, "detail": res}
+                elif op == "kb.effect.stop":
+                    self.lighting_engine.stop_effect()
+                    return {"status": 0, "restored": True, "op": op, "detail": "stopped"}
                 return {"status": -1, "restored": False, "reason": f"unknown op {op}"}
 
             if name == "fan.wmodes":
@@ -847,7 +858,7 @@ class Daemon:
         if name == "profile.get":
             return {"profile": read(f"{p}/profile"), "choices": (read(f"{p}/choices") or "").split()}
         if name == "profile.set":
-            val = args.get("name")
+            val = args.get("name") or args.get("choice")
             choices = (read(f"{p}/choices") or "").split()
             if val not in choices:
                 return {"error": f"invalid choice {val!r}", "choices": choices}

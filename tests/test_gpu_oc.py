@@ -237,6 +237,31 @@ RAM_Turbo=320
         self.assertEqual(d_set["core_offset_mhz"], 80)
         self.assertEqual(d_set["mem_offset_mhz"], 160)
 
+    def test_daemon_profile_set_name_and_choice(self):
+        """Verify profile.set accepts both 'name' and 'choice' keys."""
+        daemon = psensed.Daemon.__new__(psensed.Daemon)
+        apply_mock = MagicMock(return_value=(True, None))
+        daemon.gpu_oc = GpuOverclockManager(
+            model="Predator PHN16-71",
+            gpu_id="PCI\\VEN_10DE&DEV_28E1&SUBSYS_170F1025",
+            apply_fn=apply_mock,
+        )
+
+        with patch.object(psensed, "find_platform_profile", return_value="/tmp/mock_pp"), \
+             patch.object(psensed, "read", return_value="low-power balanced performance"), \
+             patch.object(psensed, "write", return_value=True):
+            # Test with 'name' key (used by CLI and Electron GUI)
+            res_name = daemon.op_system("profile.set", {"name": "performance"})
+            self.assertEqual(res_name["profile"], "performance")
+            self.assertTrue(res_name["gpu_oc"]["applied"])
+            self.assertEqual(res_name["gpu_oc"]["core_offset_mhz"], 100)
+
+            # Test with 'choice' key
+            res_choice = daemon.op_system("profile.set", {"choice": "balanced"})
+            self.assertEqual(res_choice["profile"], "balanced")
+            self.assertTrue(res_choice["gpu_oc"]["applied"])
+            self.assertEqual(res_choice["gpu_oc"]["core_offset_mhz"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

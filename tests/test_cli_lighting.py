@@ -168,9 +168,18 @@ class TestCliLighting(unittest.TestCase):
     def test_color_parsing_formats(self):
         self.assertEqual(psense.parse_color("00ffcc"), [0, 255, 204])
         self.assertEqual(psense.parse_color("#00ffcc"), [0, 255, 204])
+        self.assertEqual(psense.parse_color("#0fc"), [0, 255, 204])
+        self.assertEqual(psense.parse_color("0fc"), [0, 255, 204])
         self.assertEqual(psense.parse_color("0,255,200"), [0, 255, 200])
         self.assertEqual(psense.parse_color(" 10, 20, 30 "), [10, 20, 30])
         self.assertEqual(psense.parse_color(None), [0, 174, 199])
+
+    def test_kb_set_direction_parsing(self):
+        self.run_cli(["kb", "set", "wave", "--dir", "left"])
+        self.assertEqual(self.last_op.get("dir"), 2)
+
+        self.run_cli(["kb", "set", "wave", "--dir", "right"])
+        self.assertEqual(self.last_op.get("dir"), 1)
 
     def test_invalid_effect(self):
         with self.assertRaises(SystemExit):
