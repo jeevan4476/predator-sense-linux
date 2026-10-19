@@ -89,6 +89,9 @@ let _lastMonitorData = null;
 function getLastMonitorData() { return _lastMonitorData; }
 
 // ------------------------------------------------------------------ psensed
+let _daemonCallOverride = null;
+function setDaemonCallOverride(fn) { _daemonCallOverride = fn; }
+
 function daemonCallOnce(op, args, timeout = 6000) {
     return new Promise((resolve) => {
         const s = nnode.createConnection("/run/psense.sock");
@@ -105,6 +108,7 @@ function daemonCallOnce(op, args, timeout = 6000) {
     });
 }
 async function daemonCall(op, args, timeout = 6000) {
+    if (_daemonCallOverride) return await _daemonCallOverride(op, args, timeout);
     const deadline = Date.now() + timeout;
     while (true) {
         const rem = Math.max(1000, deadline - Date.now());
@@ -1570,10 +1574,13 @@ function batteryBoostStatus() {
 /* Validated keyboard EC mode ids (spec §6.3, ledger §13.14.6/§13.16).
  * Strip-only ids (NEON=2, WAVE=3) pass through too — the EC forwards verbatim. */
 const KB_EFFECT_IDS = {
-    STATIC: 0, BREATHING: 1, NEON: 2, WAVE: 3, SHIFTING: 4,
+    STATIC: 0, BREATHING: 1, NEON: 2, WAVE: 3, RAINBOW: 3, SHIFTING: 4,
     METEOR: 6, TWINKLING: 7, DIRECT: 0xFF,
 };
 const KB_DIRS = { RIGHT: 1, LEFT: 2, UP: 3, DOWN: 4, CLOCK: 5, ANTICLOCK: 6 };
+const DAEMON_MATH_EFFECTS = new Set([
+    "WAVE", "BREATHING", "SHIFTING", "METEOR", "TWINKLING", "RAINBOW", "NEON"
+]);
 const hexRgb = (hex) => {
     const m = String(hex ?? "").match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i);
     return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
@@ -1647,6 +1654,7 @@ async function applyLightingEntry(src) {
     log(`lighting write: effect=${eff} mode=${mode} speed=${speed} bri=${bri} dir=${dirNum} rgb=${rgb.join(",")}`);
     if (mode === 0) {
         lightingEngine.stopEffect();
+        await daemonCall("kb.effect.stop", {});
         // STATIC palette lives in the id-6 zone store (16-B RGB is not applied).
         // LEDs present → per-zone colors; else single picked color fills 4 zones.
         let zones = Array.isArray(src.LEDs) ? src.LEDs.slice(0, 4) : [];
@@ -1680,18 +1688,44 @@ async function applyLightingEntry(src) {
         // Animated mode active: clear zone palette cache so returning to STATIC
         // always restores per-zone hardware colors.
         kbZonePalette.clear();
-        // 4-zone hardware drops backlight with hardware method 20 animations.
-        // Hand off animation to userspace Pulsar Dynamic Lighting Engine!
-        lightingEngine.startEffect({
-            effect: eff,
-            speed,
-            brightness: bri,
-            direction: dirNum,
-            color: rgb,
-            music_effect: src.music_effect ?? src.musicEffect,
-            zoneCount: (Array.isArray(src.LEDs) && src.LEDs.length) ? src.LEDs.length : 4,
-        }, daemonCall);
-        return;
+        const zoneCount = (Array.isArray(src.LEDs) && src.LEDs.length) ? src.LEDs.length : 4;
+        if (DAEMON_MATH_EFFECTS.has(eff)) {
+            lightingEngine.stopEffect();
+            await daemonCall("kb.effect.set", {
+                effect: eff,
+                speed,
+                brightness: bri,
+                direction: dirNum,
+                rgb,
+                zoneCount,
+                zone_count: zoneCount,
+            });
+            return;
+        } else if (eff === "SCREEN" || eff === "MUSIC") {
+            await daemonCall("kb.effect.stop", {});
+            lightingEngine.startEffect({
+                effect: eff,
+                speed,
+                brightness: bri,
+                direction: dirNum,
+                color: rgb,
+                music_effect: src.music_effect ?? src.musicEffect,
+                zoneCount,
+            }, daemonCall);
+            return;
+        } else {
+            await daemonCall("kb.effect.stop", {});
+            lightingEngine.startEffect({
+                effect: eff,
+                speed,
+                brightness: bri,
+                direction: dirNum,
+                color: rgb,
+                music_effect: src.music_effect ?? src.musicEffect,
+                zoneCount,
+            }, daemonCall);
+            return;
+        }
     }
     // kb-frame cache (§13.28): re-sending the identical global frame (same
     // mode/speed/brightness/dir AND picked color — e.g. repeated fallback or no-op)
@@ -1994,4 +2028,5 @@ module.exports = {
     dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown,
     lightingEngine, HANDLERS, setOverlayToggler, toggleOverlay, getLastMonitorData,
     detectSystemModel, detectSystemFamily, detectSerialNumber,
+    applyLightingEntry, applyLightingWrite, setDaemonCallOverride,
 };

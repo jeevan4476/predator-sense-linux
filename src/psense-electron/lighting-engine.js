@@ -1,8 +1,10 @@
 /**
  * Userspace Pulsar Dynamic Lighting Engine for 4-Zone Keyboards
  *
- * Drives the 4 keyboard zones via daemonCall("kb.zone.set", { rgb: [r, g, b], zones: String(zoneIndex + 1) })
- * to avoid hardware method 20 blackouts on 4-zone laptops (e.g. Acer Predator PHN16-71).
+ * Mathematical dynamic lighting (WAVE, BREATHING, SHIFTING, METEOR, TWINKLING, RAINBOW, NEON)
+ * is delegated to the background psensed daemon for zero-overhead, GUI-independent playback.
+ * This client engine provides live sensory sampling (SCREEN capture and MUSIC audio monitoring)
+ * streaming frames to daemonCall("kb.zone.set", ...).
  */
 
 const { spawn } = require("child_process");
@@ -374,7 +376,7 @@ class LightingEngine {
                 this._startAudioMonitor(sessionId);
                 let simBeat = 0;
                 let wavePhase = 0;
-                const musicStyle = Number(config.music_effect || 1);
+                const musicStyle = Number(config.music_effect ?? config.musicEffect ?? 1);
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     wavePhase = (wavePhase + dt * (60 + speed * 30)) % 360;
                     simBeat = (simBeat + dt * 2.5) % (2 * Math.PI);
