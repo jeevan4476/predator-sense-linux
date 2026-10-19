@@ -299,8 +299,131 @@ def cmd_info(_):
 # EC effect-id space shared by keyboard/strips (binary consensus, ledger §13.14.6)
 KB_MODES = {"static": 0, "breathing": 1, "neon": 2, "wave": 3, "shifting": 4, "meteor": 6,
             "twinkling": 7, "direct": 0xFF}
+def parse_color(val):
+    """Parse color string into [r, g, b] list. Supports hex ('#00ffcc', '00ffcc') or 'r,g,b'."""
+    if not val:
+        return [0, 174, 199]
+    val = str(val).strip().lstrip("#")
+    if "," in val:
+        parts = [int(x.strip()) for x in val.split(",")]
+        if len(parts) != 3 or any(not (0 <= x <= 255) for x in parts):
+            raise ValueError('RGB components must be 0..255 (e.g. "0,255,200")')
+        return parts
+    if len(val) == 6:
+        try:
+            return [int(val[i:i+2], 16) for i in (0, 2, 4)]
+        except ValueError:
+            raise ValueError(f"invalid hex string {val!r}")
+    raise ValueError('color must be hex (e.g. "00ffcc", "#00ffcc") or "R,G,B" (e.g. "0,255,200")')
+
+
 def cmd_kb(args):
-    daemon_req({"op": "info"})  # warm error message if daemon is missing
+    daemon_req({"op": "info"}, args.sock, silent=True)  # warm error message if daemon is missing
+    if args.action == "effect":
+        sub_act = (args.mode or "status").lower()
+        if sub_act == "stop":
+            r = daemon_req({"op": "kb.effect.stop"}, args.sock, 20)
+            if r is None:
+                sys.exit(2)
+            if getattr(args, "json", False):
+                print(json.dumps(r, indent=2))
+            else:
+                if "error" in r:
+                    sys.exit(f"error: {r['error']}")
+                print("Keyboard effect stopped")
+            if "error" in r:
+                sys.exit(1)
+            return
+
+        if sub_act == "status":
+            r = daemon_req({"op": "kb.effect.get"}, args.sock, 20)
+            if r is None:
+                sys.exit(2)
+            if getattr(args, "json", False):
+                print(json.dumps(r, indent=2))
+            else:
+                if "error" in r:
+                    sys.exit(f"error: {r['error']}")
+                eff = r.get("effect") or {}
+                if eff.get("running") and eff.get("effect"):
+                    dir_label = "right" if eff.get("direction", 1) == 1 else "left"
+                    c = eff.get("color") or [0, 174, 199]
+                    c_hex = f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}"
+                    print(f"Active effect: {eff.get('effect')} (speed: {eff.get('speed')}, brightness: {eff.get('brightness')}%, dir: {dir_label}, color: {c_hex})")
+                else:
+                    print("No active dynamic keyboard effect (static/off)")
+            if "error" in r:
+                sys.exit(1)
+            return
+
+        valid_effects = ("wave", "breathing", "shifting", "meteor", "twinkling", "rainbow", "neon")
+        if sub_act not in valid_effects:
+            sys.exit(f"invalid effect: {sub_act!r}; valid choices: {', '.join(valid_effects)}")
+
+        try:
+            rgb = parse_color(args.color or args.rgb)
+        except ValueError as e:
+            sys.exit(f"invalid color: {e}")
+
+        try:
+            speed = int(args.speed) if args.speed is not None else 3
+        except ValueError:
+            sys.exit("speed must be an integer (1..9)")
+        if not (1 <= speed <= 9):
+            sys.exit("speed must be between 1 and 9")
+
+        try:
+            brightness = int(args.brightness) if args.brightness is not None else 100
+        except ValueError:
+            sys.exit("brightness must be an integer (0..100)")
+        if not (0 <= brightness <= 100):
+            sys.exit("brightness must be between 0 and 100")
+
+        dir_raw = args.dir
+        if dir_raw is not None:
+            dir_str = str(dir_raw).lower()
+            if dir_str in ("1", "right"):
+                direction = 1
+            elif dir_str in ("2", "left"):
+                direction = 2
+            else:
+                try:
+                    direction = int(dir_raw)
+                    if direction not in (1, 2):
+                        raise ValueError()
+                except ValueError:
+                    sys.exit("direction must be 1 (right) or 2 (left)")
+        else:
+            direction = 1
+
+        effect_name = sub_act
+        if effect_name == "rainbow":
+            effect_name = "wave"
+        elif effect_name == "neon":
+            effect_name = "shifting"
+
+        op = {
+            "op": "kb.effect.set",
+            "effect": effect_name,
+            "speed": speed,
+            "brightness": brightness,
+            "direction": direction,
+            "rgb": rgb,
+        }
+        r = daemon_req(op, args.sock, 20)
+        if r is None:
+            sys.exit(2)
+        if getattr(args, "json", False):
+            print(json.dumps(r, indent=2))
+        else:
+            if "error" in r:
+                sys.exit(f"error: {r['error']}")
+            dir_label = "right" if direction == 1 else "left"
+            print(f"Keyboard effect -> {effect_name.upper()} (speed: {speed}, brightness: {brightness}%, dir: {dir_label})")
+        if "error" in r:
+            sys.exit(1)
+        return
+
     if args.action == "get":
         op = {"op": "kb.get"}
     elif args.action == "restore":
@@ -325,9 +448,12 @@ def cmd_kb(args):
             rgb = [int(x) for x in (args.rgb or "255,0,0").split(",", 2)]
         except ValueError:
             sys.exit('rgb format: "R,G,B"')
+        speed = int(args.speed) if args.speed is not None else 0
+        brightness = int(args.brightness) if args.brightness is not None else 100
+        dir_val = int(args.dir) if args.dir is not None else 0
         op = {"op": "kb.set", "mode": mode, "rgb": rgb,
-              "speed": args.speed, "brightness": args.brightness,
-              "dir": args.dir, "device": args.device}
+              "speed": speed, "brightness": brightness,
+              "dir": dir_val, "device": args.device}
     r = daemon_req(op, args.sock, 20)
     if r is None:
         sys.exit(2)
@@ -737,16 +863,20 @@ def main():
     p.add_argument("--step", default=10)
     p.add_argument("--sock", default="/run/psense.sock")
 
-    p = sub.add_parser("kb", help="keyboard backlight via psensed: get|zone|set|restore")
-    p.add_argument("action", choices=["get", "zone", "set", "restore"], default="get", nargs="?")
-    p.add_argument("mode", nargs="?", default=None, help="kb set: mode id or name (static|breathing|neon|wave|shifting|meteor|twinkling|direct)")
+    p = sub.add_parser("kb", help="keyboard backlight via psensed: get|zone|set|restore|effect")
+    p.add_argument("action", choices=["get", "zone", "set", "restore", "effect"], default="get", nargs="?")
+    p.add_argument("mode", nargs="?", default=None,
+                   help="kb set/effect: mode or effect name (wave|breathing|shifting|meteor|twinkling|stop|status)")
     p.add_argument("--rgb", default=None, help='"R,G,B"')
+    p.add_argument("--color", default=None, help='kb effect: color ("00ffcc", "#00ffcc", or "R,G,B")')
     p.add_argument("--zones", default=None, help='kb zone(s): "1,2,3,4" or "all" (zone)')
-    p.add_argument("--speed", default=0, help="kb set: effect speed (int)")
-    p.add_argument("--brightness", default=100, metavar="N",
-                   help="kb set: register brightness 0..255 (their UI 0..5 ×20)")
-    p.add_argument("--dir", default=0, help="kb set: direction, 0-based (int)")
+    p.add_argument("--speed", default=None, help="effect speed (1..9, default 3 for effect; int for set)")
+    p.add_argument("--brightness", default=None, metavar="N",
+                   help="brightness (0..100 for effect, default 100; 0..255 for set)")
+    p.add_argument("--direction", "--dir", dest="dir", default=None,
+                   help="direction: 1|right, 2|left (default 1 for effect)")
     p.add_argument("--device", default=1, help="kb set: device byte, 1=kb (int)")
+    p.add_argument("--json", action="store_true", help="output as JSON")
     p.add_argument("--sock", default="/run/psense.sock")
 
     p = sub.add_parser("wmi", help="raw whitelisted WMI eval via psensed")

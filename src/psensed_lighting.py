@@ -120,6 +120,10 @@ class DaemonLightingEngine:
     def start_effect(self, effect, speed=3, brightness=100, direction=1, color=(0, 174, 199), zone_count=4):
         """Start or reconfigure an animation effect."""
         eff_upper = str(effect or "").upper()
+        if eff_upper == "RAINBOW":
+            eff_upper = "WAVE"
+        elif eff_upper == "NEON":
+            eff_upper = "SHIFTING"
         if eff_upper not in ("BREATHING", "WAVE", "SHIFTING", "METEOR", "TWINKLING"):
             raise ValueError(f"Unknown effect: {effect}")
 

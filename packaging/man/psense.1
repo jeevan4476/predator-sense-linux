@@ -44,7 +44,33 @@ WMI fan-table surface (raw percent/level writes, raw table read).
 Userspace temp\(enpercent curves with hysteresis, interpreted by the daemon.
 .TP
 .B kb get | zone I R,G,B | set LIGHTMODE BRIGHTNESS --rgb R,G,B
-Keyboard backlight and per-zone colors via the WMI keyboard surface.
+.B / kb effect [EFFECT] [--speed N] [--brightness N] [--direction 1|2] [--color HEX] [--json]
+.B / kb effect stop | status
+Keyboard backlight, per-zone colors, and dynamic daemon lighting effects.
+Supported dynamic effects:
+.IR wave ,
+.IR breathing ,
+.IR shifting ,
+.IR meteor ,
+.IR twinkling .
+Dynamic effects are calculated and animated smoothly by the background engine in
+.BR psensed (8),
+persisting across reboots and working completely independently of the GUI.
+Use
+.B kb effect stop
+to halt dynamic lighting or
+.B kb effect status
+(or
+.BR "kb effect" )
+to view current animation parameters. Options include
+.BI \-\-speed " 1..9"
+(default 3),
+.BI \-\-brightness " 0..100"
+(default 100),
+.BI \-\-direction " 1|2"
+(1=right, 2=left), and
+.BI \-\-color " HEX|R,G,B"
+(default teal).
 .TP
 .B battmode get | set MODE
 Battery charge mode via the BatteryControl WMI surface (GUID begins
