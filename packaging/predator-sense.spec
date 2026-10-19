@@ -24,7 +24,7 @@
 
 Name:           predator-sense
 Version:        5.0.1463
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Acer Predator control for Linux (daemon, CLI, exact-clone GUI)
 
 License:        GPL-2.0-or-later
@@ -194,6 +194,11 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
+* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-6
+- Fix EADDRINUSE 15150 crash by adding Electron single-instance locking
+- Auto-restore and focus existing window on second instance launch
+- Add pre-listen EADDRINUSE error guards on broker and agent servers
+
 * Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-5
 - Open-source preparation: 100% offline privacy shield, blocked telemetry
 - Neutralize Acer Account login and registration dead ends

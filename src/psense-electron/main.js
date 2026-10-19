@@ -13,6 +13,20 @@
  * backend.js (scenario store + psensed socket ops).
  */
 const { app, BrowserWindow, ipcMain, protocol, net, Tray, Menu, nativeImage, Notification, screen, session } = require("electron");
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+    app.quit();
+    process.exit(0);
+}
+
+app.on("second-instance", (event, commandLine, workingDirectory) => {
+    if (mainWin) {
+        if (!mainWin.isVisible()) mainWin.show();
+        if (mainWin.isMinimized()) mainWin.restore();
+        mainWin.focus();
+    }
+});
 const path = require("path");
 const tls = require("tls");
 const http = require("http");
@@ -438,6 +452,13 @@ async function startAgentWebservers() {
                 }
                 sock.on("close", () => { if (notifyTimer) clearInterval(notifyTimer); });
             });
+            srv.on("error", (e) => {
+                if (e.code === "EADDRINUSE") {
+                    console.error(`[agent] port ${port} already in use, skipping listen`);
+                } else {
+                    console.error(`[agent] ${port} error:`, e.message);
+                }
+            });
             srv.listen(Number(port), "localhost");
             servers.push(srv);
             console.log(`[agent] ${port} (${question.match(/Acer(\w+)Functionality/)[1]}) wedge up`);
@@ -461,14 +482,25 @@ function startBroker() {
 
     const httpsSrv = require("https").createServer(tlsOpts);
     websocketStream.createServer({ server: httpsSrv, path: "/mqtt" }, aedes.handle);
+    httpsSrv.on("error", (e) => {
+        if (e.code === "EADDRINUSE") {
+            console.error(`[broker] port ${WSS_PORT} already in use, skipping listen`);
+        } else {
+            console.error("[broker] https server error:", e.message);
+        }
+    });
     httpsSrv.listen(WSS_PORT, "localhost");
 
     const httpSrv = http.createServer();
     websocketStream.createServer({ server: httpSrv, path: "/mqtt" }, aedes.handle);
+    httpSrv.on("error", (e) => {
+        if (e.code === "EADDRINUSE") {
+            console.error(`[broker] port ${WS_PORT} already in use, skipping listen`);
+        } else {
+            console.error("[broker] http server error:", e.message);
+        }
+    });
     httpSrv.listen(WS_PORT, "localhost");
-
-    [httpsSrv, httpSrv].forEach((s) => s.on("error", (e) =>
-        console.error("[broker] server error", e.message)));
 
     return { aedes, httpsSrv, httpSrv };
 }
