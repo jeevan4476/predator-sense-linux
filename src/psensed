@@ -63,6 +63,8 @@ import threading
 import time
 import ipaddress
 
+from psensed_lighting import DaemonLightingEngine, clamp_rgb
+
 CACHE_S = 2.0        # sensor cache TTL
 DEBOUNCE_S = 2.0     # rpm is misleading right after mode writes
 WRITE_GAP = 0.03     # firmware pacing (Acer sleeps 30 ms between calls)
@@ -278,11 +280,39 @@ class Daemon:
         self.wmi_result = None
         self.wmi_conn = None
         self.wmi_started = 0.0
+        self._last_lighting_zones = None
+        self.lighting_engine = DaemonLightingEngine(self._apply_lighting_frame)
         threading.Thread(target=self._wmi_worker, name="psensed-wmi", daemon=True).start()
         # restore keyboard lighting if previous state was persisted
         self.wmi_q.put(("kb.restore", {}))
         # fan channel → {"points": [(t,pct)...], "last_pct": int|None}
         self.curves = {}
+
+    def _apply_lighting_frame(self, zones):
+        """Pass computed dynamic lighting zone frame to WMI."""
+        if not zones:
+            return
+        w = self.wmi
+        count = len(zones)
+        if self._last_lighting_zones is None or len(self._last_lighting_zones) != count:
+            self._last_lighting_zones = [None] * count
+
+        # If all zones are identical, check if changed and write once to all zones
+        first = zones[0]
+        if all(z == first for z in zones):
+            if not all(lz == first for lz in self._last_lighting_zones):
+                r, g, b = first
+                for i in range(count):
+                    zb = 1 << i
+                    w.eval("gaming", 6, _u64(zb, r, g, b), 4)
+                    self._last_lighting_zones[i] = first
+        else:
+            for i, z in enumerate(zones):
+                if z != self._last_lighting_zones[i]:
+                    r, g, b = z
+                    zb = 1 << i
+                    w.eval("gaming", 6, _u64(zb, r, g, b), 4)
+                    self._last_lighting_zones[i] = z
 
     # ------------------------------------------------------------------ io
     def _read_temps(self, force=False):
@@ -421,7 +451,40 @@ class Daemon:
                     })
                 return out
 
+            if name == "kb.effect.set":
+                eff = args.get("effect")
+                if not eff:
+                    return {"error": "effect is required (BREATHING, WAVE, SHIFTING, METEOR, TWINKLING)"}
+                speed = args.get("speed", 3)
+                brightness = args.get("brightness", 100)
+                direction = args.get("direction", 1)
+                rgb = args.get("rgb") or args.get("color") or [0, 174, 199]
+                try:
+                    color = clamp_rgb(rgb)
+                except Exception:
+                    return {"error": "rgb/color must be [r,g,b] ints"}
+                zone_count = int(args.get("zone_count", 4))
+                try:
+                    self.lighting_engine.start_effect(
+                        eff, speed=speed, brightness=brightness,
+                        direction=direction, color=color, zone_count=zone_count
+                    )
+                except ValueError as e:
+                    return {"error": str(e)}
+                _save_lighting_state({"op": "kb.effect.set", "args": args})
+                return {"status": 0, "effect": self.lighting_engine.get_status()}
+
+            if name == "kb.effect.stop":
+                self.lighting_engine.stop_effect()
+                _save_lighting_state({"op": "kb.effect.stop", "args": {}})
+                return {"status": 0, "stopped": True}
+
+            if name == "kb.effect.get":
+                return {"status": 0, "effect": self.lighting_engine.get_status()}
+
             if name == "kb.zone.set":
+                # Static zone write yields dynamic lighting
+                self.lighting_engine.stop_effect()
                 rgb = args.get("rgb", [0, 0, 0])
                 try:
                     r, g, b = (max(0, min(255, int(x))) for x in rgb)
@@ -449,6 +512,7 @@ class Daemon:
                 return {"zones": [f"kb-zone-{i+1}" for i in range(len(applied))], "applied": applied}
 
             if name == "kb.set":
+                self.lighting_engine.stop_effect()
                 try:
                     mode = int(args.get("mode", 0)) & 0xFF
                     speed = int(args.get("speed", 0)) & 0xFF
@@ -475,7 +539,22 @@ class Daemon:
                     return {"status": 0, "restored": False, "reason": "no saved state"}
                 op = state.get("op")
                 s_args = state.get("args", {})
-                if op == "kb.set":
+                if op == "kb.effect.set":
+                    eff = s_args.get("effect")
+                    speed = s_args.get("speed", 3)
+                    brightness = s_args.get("brightness", 100)
+                    direction = s_args.get("direction", 1)
+                    rgb = s_args.get("rgb") or s_args.get("color") or [0, 174, 199]
+                    zone_count = s_args.get("zone_count", 4)
+                    try:
+                        self.lighting_engine.start_effect(
+                            eff, speed=speed, brightness=brightness,
+                            direction=direction, color=clamp_rgb(rgb), zone_count=zone_count
+                        )
+                        return {"status": 0, "restored": True, "op": op, "effect": self.lighting_engine.get_status()}
+                    except Exception as e:
+                        return {"status": -1, "restored": False, "op": op, "error": str(e)}
+                elif op == "kb.set":
                     res = self.op_wmi("kb.set", s_args)
                     return {"status": res.get("status", -1), "restored": True, "op": op, "detail": res}
                 elif op == "kb.zone.set":
