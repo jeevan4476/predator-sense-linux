@@ -410,17 +410,32 @@ const HANDLERS = {
         GA_Test_SendEvent: () => null,
         getTemperatureUnit: () => 1,    // cn.Celsius (their store default = 1)
         getneedtosendpp: () => false,
-        getAcerAccount: () => null,
+        getAcerAccount: () => ({
+            isLogin: false,
+            baseUrl: "",
+            redirectUrl: "",
+            clientId: "",
+            clientSecret: "",
+        }),
         getAcerCredential: () => null,
-        removeAcerCredential: () => { kvSet("AcerIdKey", null); return null; },
-        getAcerAnswer: () => null,
-        getAcerCommunity: () => null,
-        getAcerBoxTicked: () => null,
+        removeAcerCredential: () => null,
+        getAcerAnswer: () => [],
+        getAcerCommunity: () => [],
+        getAcerBoxTicked: () => false,
         getProclip: () => null,
         getForceRegistFail: () => false,
+        getProductRegistrationDone: () => true,
+        getRegistedInfoByAcerValidProdAPI: () => true,
+        getRegistrationDate: () => Date.now(),
+        getWarrantyInfo: () => ({
+            status: "Active (Local Hardware)",
+            warrantyType: "Hardware",
+            expiryDate: "N/A",
+        }),
         getFirebaseSenderId: () => "",
         getBackendApiUrl: () => "",
-        getNewerUpdates: () => null,
+        getNewerUpdates: () => ({ HasNewerVersion: 2 }),
+        getLiveUpdateList: () => [],
         getUpdateCheckPeriod: () => 0,
         getUpdateWarrantyDatePeriod: () => 0,
         getAvailableSize: () => null,
@@ -432,7 +447,6 @@ const HANDLERS = {
             PurifiedView: true,
             PurifiedVoice: true,
         }),
-        getForceRegistFail: () => false,
         getHasStoreNewerVersionStatus: () => false,
         getLastActiveContentPath: () => loadKV()["LastActiveContentPath"] ?? "",
         setLastActiveContentPath: ([v]) => { kvSet("LastActiveContentPath", v ?? ""); return null; },
@@ -795,6 +809,12 @@ const HANDLERS = {
         OnEyeDropper: () => null,
         inspect: () => null,
         GetNotificationIcon: () => null,
+        openAcerAccount: () => null,
+        openUpdateCheckDialog: () => null,
+        openSignoutDialog: () => null,
+        openRegisterBySnDialog: () => null,
+        openRetryRegisterDialog: () => null,
+        openOOBEDialog: () => null,
     },
     pssdk: {
         setDeviceData: async ([funcName, data]) => {
@@ -1044,19 +1064,33 @@ const HANDLERS = {
     },
 };
 
+// Neutralize any unhandled dialog/modal invocations in HANDLERS.util
+HANDLERS.util = new Proxy(HANDLERS.util, {
+    get(target, prop) {
+        if (prop in target) return target[prop];
+        if (typeof prop === "string" && (prop.startsWith("open") || prop.endsWith("Dialog") || prop.includes("Dialog") || prop.includes("OOBE") || prop.includes("Register") || prop.includes("Sign"))) {
+            return () => null;
+        }
+        return target[prop];
+    },
+});
+
 // generate the KV get/set pairs on HANDLERS.info
 for (const [key, setFn, getFn, def] of KV_PAIRS) {
-    if (HANDLERS.info[getFn]) continue;             // explicit handler wins
-    HANDLERS.info[setFn] = (a) => {
-        const v = Array.isArray(a) && a.length === 1 ? a[0] : (a === undefined ? null : a);
-        kvSet(key, v === undefined ? null : v);
-        return null;
-    };
-    HANDLERS.info[getFn] = () => {
-        const kv = loadKV();
-        if (kv[key] !== undefined) return kv[key];
-        return typeof def === "function" ? def() : def;
-    };
+    if (!HANDLERS.info[setFn]) {
+        HANDLERS.info[setFn] = (a) => {
+            const v = Array.isArray(a) && a.length === 1 ? a[0] : (a === undefined ? null : a);
+            kvSet(key, v === undefined ? null : v);
+            return null;
+        };
+    }
+    if (!HANDLERS.info[getFn]) {
+        HANDLERS.info[getFn] = () => {
+            const kv = loadKV();
+            if (kv[key] !== undefined) return kv[key];
+            return typeof def === "function" ? def() : def;
+        };
+    }
 }
 // BACTimeZone pair is generated from KV_PAIRS above
 
