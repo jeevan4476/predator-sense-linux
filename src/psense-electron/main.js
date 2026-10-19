@@ -12,7 +12,7 @@
  * and answers call_PWARuntime {getAllFuncs, ddsc} by dispatching into
  * backend.js (scenario store + psensed socket ops).
  */
-const { app, BrowserWindow, ipcMain, protocol, net, Tray, Menu, nativeImage, Notification, screen } = require("electron");
+const { app, BrowserWindow, ipcMain, protocol, net, Tray, Menu, nativeImage, Notification, screen, session } = require("electron");
 const path = require("path");
 const tls = require("tls");
 const http = require("http");
@@ -890,6 +890,14 @@ function createWindow() {
     });
     backend.setWindow(mainWin);
 
+    // Ensure external navigation cannot leak hardware info
+    mainWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    mainWin.webContents.on("will-navigate", (event, navUrl) => {
+        if (!navUrl.startsWith("pss://") && !navUrl.startsWith("data:")) {
+            event.preventDefault();
+        }
+    });
+
     try { require("@electron/remote/main").enable(mainWin.webContents); }
     catch (e) { console.error("[remote] enable failed", e.message); }
 
@@ -1225,6 +1233,19 @@ function createTray() {
 }
 
 app.whenReady().then(() => {
+    const BLOCKED_DOMAINS = [
+        "*://*.google-analytics.com/*",
+        "*://*.analytics.google.com/*",
+        "*://*.googletagmanager.com/*",
+        "*://*.firebaseio.com/*",
+        "*://*.firebase.com/*",
+        "*://*.acer.com/*",
+        "*://*.planet9.gg/*",
+    ];
+    session.defaultSession.webRequest.onBeforeRequest({ urls: BLOCKED_DOMAINS }, (details, callback) => {
+        callback({ cancel: true });
+    });
+
     app.commandLine.appendSwitch("ignore-certificate-errors");
     // their renderer does require('@electron/remote') (window maximize service)
     try {
