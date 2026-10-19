@@ -782,7 +782,7 @@ class Daemon:
             if name == "battmode.get":
                 # BatteryControl GetBatteryHealthControlStatus (BE* id 20) —
                 # the live-verified charge-function truth (ledger §13.26).
-                # in  = [uBatteryNo=1, uFunctionQuery=1, reserved2]
+                # in  = [uBatteryNo=1, uFunctionQuery=1, reserved[2]
                 # out = [uFunctionList, uReturn[2], uFunctionStatus[5]] —
                 # status[0]==1 → Optimized enabled (functionMask 1); all 0 →
                 # Full/default charging; functionMask 4 = adaptive (rejected

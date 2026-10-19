@@ -1,6 +1,6 @@
 /* ddsc dispatch → psensed (or local stubs).
  *
- * Response-convention notes from the decode:
+ * Response-convention notes from the various decode targets:
  *  - scenario.* carries the whole app data model (profiles[], active,
  *    lighting...); ours persists to ~/.config/predator-sense-linux-scenario.json
  *  - pssdk.setDeviceData(funcName,data)/getUpdatedData(funcName) is a keyed

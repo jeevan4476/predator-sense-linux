@@ -8,6 +8,18 @@
  */
 
 const assert = require("assert");
+
+// CI (and any machine without electron installed) can't resolve the real
+// electron module; backend.js only needs app/screen/Notification symbols at
+// load time, so hand it inert stubs.
+const Module = require("node:module");
+const origLoad = Module._load;
+Module._load = function (request) {
+    if (request === "electron")
+        return { app: {}, screen: {}, Notification: {} };
+    return origLoad.apply(this, arguments);
+};
+
 const {
     applyLightingEntry,
     applyLightingWrite,
