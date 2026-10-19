@@ -116,6 +116,25 @@ def _load_lighting_state():
             continue
     return None
 
+
+def _kb_frame(mode, speed, bri, direction, rgb, device=1):
+    """16-B SetGamingKBBacklightEffect frame, controller-DLL layout.
+
+    AcerECKeyboardController::SetMode packs [0]=mode [1]=speed [2]=brightness
+    [3]=direction+1 [4..6]=R,G,B [7]=0 [8]=0x03 on-flag [9]=device (ledger
+    §13.14). Live-verified on PHN16-71 (2026-10-19): the EC consumes the RGB
+    from [4..6] and mode 1 BREATHING then animates natively at full
+    brightness. The earlier in-repo layout ([3]=0, [4]=dir, RGB at [5..7])
+    landed every byte one slot late — the blue channel hit the on-flag byte —
+    which is what made animated modes drop the backlight and forced the
+    userspace animation engine. STATIC (mode 0) never showed the bug because
+    its visuals come from the id-6 zone store, not the frame RGB."""
+    r, g, b = (max(0, min(255, int(c))) for c in rgb)
+    return bytes([mode & 0xFF, speed & 0xFF, bri & 0xFF,
+                  (int(direction) + 1) & 0xFF, r, g, b, 0x00,
+                  0x03, device & 0xFF, 0, 0, 0, 0, 0, 0])
+
+
 # ------------------------------------------------------- WMI module (M3)
 # /dev/psense-wmi exposes a whitelisted WMI-eval ioctl (CAP_SYS_ADMIN only);
 # the kernel enforces the ≥30 ms vendor pacing itself.  Guid slots must stay
@@ -128,6 +147,12 @@ FAN_ID = {"cpu": 0x01, "gpu": 0x04, "both": 0x05}
 FAN_BITMAP = {"cpu": 0x0001, "gpu": 0x0008, "both": 0x0009}
 WMI_MODE = {"auto": 1, "turbo": 2, "custom": 3}
 WMI_MODE_NAME = {v: k for k, v in WMI_MODE.items()}
+# Keyboard EC-native animated mode ids (AcerECKeyboardController mode table,
+# ledger §13.14.6). These render INSIDE the EC from a single 16-B frame —
+# no per-frame SMM evals, zero steady-state CPU. WAVE/RAINBOW/NEON are
+# strip-only ids (absent from the KB table) and SCREEN/MUSIC are reactive;
+# those stay on the software engine.
+KB_EC_EFFECTS = {"BREATHING": 1, "SHIFTING": 4, "METEOR": 6, "TWINKLING": 7}
 WMI_TIMEOUT_S = 25.0   # defer/reply watchdog for one queued eval (kernel call
                        # itself is uninterruptible — see _wmi_worker)
 
@@ -303,6 +328,12 @@ class Daemon:
         # frame write.
         self._ec_zone_colors = {}
         self.lighting_engine = DaemonLightingEngine(self._apply_lighting_frame)
+        # EC-native animated effect currently programmed into the keyboard
+        # ({"engine","effect","mode",...}) or None when static/software. The
+        # EC animates autonomously from one 16-B frame; a zone write or a
+        # switch to STATIC must retire that frame first (_kb_ensure_static).
+        self._ec_effect = None
+        self._last_kb_bri = 100
         threading.Thread(target=self._wmi_worker, name="psensed-wmi", daemon=True).start()
         # restore keyboard lighting if previous state was persisted
         self.wmi_q.put(("kb.restore", {}))
@@ -437,6 +468,57 @@ class Daemon:
         elif res is not None and not (isinstance(res, dict) and res.get("restored") is not None):
             log("late wmi result with no waiting client — dropped")
 
+    def _kb_ensure_static(self, force=False):
+        """Retire any active lighting (software engine or EC-native animated
+        frame) and put the EC back in STATIC so the id-6 zone store shows
+        through. A known-active EC frame (or force=True) always rewrites the
+        mode-0 frame — the EC's frame registers persist across daemon
+        restarts, so an animation must never keep running over fresh zone
+        colors."""
+        self.lighting_engine.stop_effect()
+        if not (force or self._ec_effect or self.lighting_engine.running):
+            return False
+        frame = _kb_frame(0, 0, self._last_kb_bri, 0, (0, 0, 0))
+        self.wmi.eval("gaming", 20, frame, 4)
+        self._ec_effect = None
+        return True
+
+    def _kb_apply_effect(self, eff, speed, brightness, direction, color,
+                         zone_count=4):
+        """Apply a named keyboard lighting effect.
+
+        EC-native modes (BREATHING, SHIFTING, METEOR, TWINKLING — the
+        AcerECKeyboardController mode table, ledger §13.14.6) become ONE
+        16-B frame the EC renders autonomously: zero steady-state CPU. The
+        userspace engine previously animated these at 26 fps ≈ 18 zone-write
+        SMM evals/s ≈ 0.3 core, for the same visual result. WAVE/RAINBOW/
+        NEON aliases follow the engine's own mapping; SCREEN/MUSIC stay
+        reactive (software engine)."""
+        eff_u = str(eff).upper()
+        if eff_u == "RAINBOW":
+            eff_u = "WAVE"
+        elif eff_u == "NEON":
+            eff_u = "SHIFTING"
+        mode_id = KB_EC_EFFECTS.get(eff_u)
+        if mode_id is not None:
+            frame = _kb_frame(mode_id, speed, brightness, direction, color)
+            status, data = self.wmi.eval("gaming", 20, frame, 4)
+            self._last_kb_bri = int(brightness) & 0xFF
+            self._ec_effect = {"engine": "ec-native", "effect": eff_u,
+                               "mode": mode_id, "speed": speed,
+                               "brightness": brightness,
+                               "direction": direction, "rgb": list(color)}
+            return {"status": status, "ack": data.hex(),
+                    "frame": frame.hex(), **self._ec_effect}
+        try:
+            self.lighting_engine.start_effect(
+                eff_u, speed=speed, brightness=brightness,
+                direction=direction, color=color, zone_count=zone_count
+            )
+        except ValueError as e:
+            return {"error": str(e)}
+        return {"engine": "software", **self.lighting_engine.get_status()}
+
     def op_wmi(self, name, args):
         """Ops through the psense-wmi module (/dev/psense-wmi, root only).
         The kernel enforces whitelist + ≥30 ms pacing; daemon stays stateless."""
@@ -469,13 +551,18 @@ class Daemon:
             if name == "kb.get":
                 status, data = w.eval("gaming", 21, struct.pack("<I", 1), 16)
                 out = {"status": status, "raw": data.hex()}
-                if len(data) >= 11:
-                    # reply mirror of the last 16-B write (ledger §13.16):
-                    # [0] gate, [2]=mode echo, [3]=brightness, [5]=dir echo,
-                    # [6..8]=RGB echo, [9]=on-flag (0x03 seen after kb.set w/ [8]=3)
+                if len(data) >= 10:
+                    # EC state readout, live-calibrated 2026-10-19: a method-20
+                    # write of mode 1/speed 3/bri 100/rgb C7,3E,14 echoed
+                    # 00 01 03 64 .. c7 3e 14 .. 03 → [1]=mode, [2]=speed,
+                    # [3]=brightness, [4]=direction, [5..7]=16-B frame RGB,
+                    # [6..8]=zone-store RGB (overlapping echo window — after
+                    # id-6 zone writes the visible color sits here), [9]=0x03.
+                    # The old parse ([2]=mode, [6..8]=rgb) was off by one.
                     out.update({
-                        "mode": data[2], "brightness": data[3],
-                        "dir": data[5],
+                        "mode": data[1], "speed": data[2],
+                        "brightness": data[3], "dir": data[4],
+                        "frame_rgb": [data[5], data[6], data[7]],
                         "rgb": [data[6], data[7], data[8]],
                         "flag9": data[9],
                     })
@@ -495,23 +582,26 @@ class Daemon:
                 except Exception:
                     return {"error": "rgb/color must be [r,g,b] ints"}
                 zone_count = int(args.get("zone_count", 4))
-                try:
-                    self.lighting_engine.start_effect(
-                        eff, speed=speed, brightness=brightness,
-                        direction=direction, color=color, zone_count=zone_count
-                    )
-                except ValueError as e:
-                    return {"error": str(e)}
-                _save_lighting_state({"op": "kb.effect.set", "args": args})
-                return {"status": 0, "effect": self.lighting_engine.get_status()}
+                res = self._kb_apply_effect(eff, speed, brightness,
+                                            direction, color, zone_count)
+                if "error" in res:
+                    return res
+                if res.get("status", 0) == 0:
+                    _save_lighting_state({"op": "kb.effect.set", "args": args})
+                return {"status": res.get("status", 0), "effect": res}
 
             if name == "kb.effect.stop":
-                self.lighting_engine.stop_effect()
-                self._ec_zone_colors.clear()   # EC now shows the last animated frame
+                # "Stop" means "go static": retire the software engine AND any
+                # EC-native animated frame — otherwise the EC keeps animating
+                # over the zone store. Always writes the mode-0 frame (force).
+                self._kb_ensure_static(force=True)
+                self._ec_zone_colors.clear()   # EC now shows the zone store again
                 _save_lighting_state({"op": "kb.effect.stop", "args": {}})
                 return {"status": 0, "stopped": True}
 
             if name == "kb.effect.get":
+                if self._ec_effect:
+                    return {"status": 0, "effect": dict(self._ec_effect)}
                 return {"status": 0, "effect": self.lighting_engine.get_status()}
 
             if name == "kb.zone.set":
@@ -521,8 +611,8 @@ class Daemon:
                 # continuously; every duplicate costs a 0.2-0.9 s SMM eval on
                 # the serialized worker and keeps the CPU/persona busy. Only
                 # zones whose direct zone color actually changes are written.
-                self.lighting_engine.stop_effect()
-                self._ec_zone_colors.clear()   # stop_effect may repaint zones
+                self._kb_ensure_static()   # retires engine + EC-native frame
+                self._ec_zone_colors.clear()   # stop may repaint zones
                 rgb = args.get("rgb", [0, 0, 0])
                 try:
                     r, g, b = (max(0, min(255, int(x))) for x in rgb)
@@ -557,6 +647,7 @@ class Daemon:
 
             if name == "kb.set":
                 self.lighting_engine.stop_effect()
+                self._ec_effect = None   # the frame written below supersedes any EC animation
                 try:
                     mode = int(args.get("mode", 0)) & 0xFF
                     speed = int(args.get("speed", 0)) & 0xFF
@@ -570,9 +661,11 @@ class Daemon:
                     r, g, b = (max(0, min(255, int(x))) for x in rgb)
                 except (TypeError, ValueError):
                     return {"error": "rgb must be [r,g,b] ints"}
-                frame = bytes([mode, speed, bri, 0x00, direction & 0xFF,
-                               r, g, b, 0x03, device, 0, 0, 0, 0, 0, 0])
+                if mode in (0, 0xFF):   # STATIC/DIRECT: EC ignores speed≠0 (§13.20)
+                    speed = 0
+                frame = _kb_frame(mode, speed, bri, direction, (r, g, b), device)
                 status, data = w.eval("gaming", 20, frame, 4)
+                self._last_kb_bri = bri
                 self._ec_zone_colors.clear()   # 16-B frame does not update the zone store
                 if status == 0:
                     _save_lighting_state({"op": "kb.set", "args": args})
@@ -592,13 +685,16 @@ class Daemon:
                     rgb = s_args.get("rgb") or s_args.get("color") or [0, 174, 199]
                     zone_count = s_args.get("zone_count", 4)
                     try:
-                        self.lighting_engine.start_effect(
-                            eff, speed=speed, brightness=brightness,
-                            direction=direction, color=clamp_rgb(rgb), zone_count=zone_count
+                        res = self._kb_apply_effect(
+                            eff, speed, brightness, direction,
+                            clamp_rgb(rgb), zone_count
                         )
-                        return {"status": 0, "restored": True, "op": op, "effect": self.lighting_engine.get_status()}
                     except Exception as e:
                         return {"status": -1, "restored": False, "op": op, "error": str(e)}
+                    if "error" in res:
+                        return {"status": -1, "restored": False, "op": op,
+                                "error": res["error"]}
+                    return {"status": 0, "restored": True, "op": op, "effect": res}
                 elif op == "kb.set":
                     res = self.op_wmi("kb.set", s_args)
                     return {"status": res.get("status", -1), "restored": True, "op": op, "detail": res}
@@ -606,7 +702,7 @@ class Daemon:
                     res = self.op_wmi("kb.zone.set", s_args)
                     return {"status": 0, "restored": True, "op": op, "detail": res}
                 elif op == "kb.effect.stop":
-                    self.lighting_engine.stop_effect()
+                    self._kb_ensure_static(force=True)
                     return {"status": 0, "restored": True, "op": op, "detail": "stopped"}
                 return {"status": -1, "restored": False, "reason": f"unknown op {op}"}
 

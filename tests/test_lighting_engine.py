@@ -144,8 +144,13 @@ class TestPsensedIntegration(unittest.TestCase):
             daemon = MockDaemon()
             daemon.wmi = DummyWmi()
             daemon._last_lighting_zones = None
+            daemon._ec_zone_colors = {}
+            daemon._ec_effect = None
+            daemon._last_kb_bri = 100
             daemon.lighting_engine = DaemonLightingEngine(lambda z: psensed.Daemon._apply_lighting_frame(daemon, z))
             daemon.op_wmi = lambda name, args: psensed.Daemon.op_wmi(daemon, name, args)
+            daemon._kb_ensure_static = lambda force=False: psensed.Daemon._kb_ensure_static(daemon, force=force)
+            daemon._kb_apply_effect = lambda *a, **k: psensed.Daemon._kb_apply_effect(daemon, *a, **k)
 
             # Test kb.effect.set
             res = daemon.op_wmi("kb.effect.set", {
@@ -178,21 +183,41 @@ class TestPsensedIntegration(unittest.TestCase):
             self.assertFalse(daemon.lighting_engine.get_status()["running"])
             self.assertEqual(len(res_zone["applied"]), 4)
 
-            # Test kb.restore restores dynamic effect
-            # First set an effect again to save state
-            daemon.op_wmi("kb.effect.set", {"effect": "BREATHING", "speed": 3, "color": [0, 200, 255]})
-            daemon.lighting_engine.stop_effect()
+            # EC-native effects: BREATHING becomes ONE 16-B frame (method 20)
+            # that the EC renders autonomously — no engine thread, zero CPU.
+            res_ec = daemon.op_wmi("kb.effect.set", {"effect": "BREATHING", "speed": 3, "color": [0, 200, 255]})
+            self.assertEqual(res_ec["status"], 0)
+            self.assertEqual(res_ec["effect"]["engine"], "ec-native")
+            self.assertEqual(res_ec["effect"]["effect"], "BREATHING")
             self.assertFalse(daemon.lighting_engine.get_status()["running"])
+            self.assertEqual(daemon._ec_effect["mode"], 1)
+            self.assertEqual(saved_states[-1]["op"], "kb.effect.set")
+            guid, mid, frame, _ = daemon.wmi.calls[-1]
+            self.assertEqual((guid, mid), ("gaming", 20))
+            # controller-DLL layout: [0]=mode, [3]=dir+1, [4..6]=RGB, [8]=0x03
+            self.assertEqual(frame[0], 1)
+            self.assertEqual(frame[3], 2)   # direction 1 → +1
+            self.assertEqual(tuple(frame[4:7]), (0, 200, 255))
+            self.assertEqual(frame[8], 0x03)
 
+            # kb.restore replays the saved EC-native effect as a frame write
+            daemon._ec_effect = None
+            calls_before = len(daemon.wmi.calls)
             res_restore = daemon.op_wmi("kb.restore", {})
             self.assertTrue(res_restore["restored"])
-            self.assertTrue(daemon.lighting_engine.get_status()["running"])
-            self.assertEqual(daemon.lighting_engine.get_status()["effect"], "BREATHING")
+            self.assertEqual(res_restore["effect"]["engine"], "ec-native")
+            self.assertEqual(daemon._ec_effect["mode"], 1)
+            self.assertEqual(len(daemon.wmi.calls), calls_before + 1)
+            self.assertEqual(daemon.wmi.calls[-1][1], 20)
 
-            # Test kb.effect.stop
+            # kb.effect.stop retires the EC frame with a mode-0 STATIC write
             res_stop = daemon.op_wmi("kb.effect.stop", {})
             self.assertEqual(res_stop["status"], 0)
+            self.assertIsNone(daemon._ec_effect)
             self.assertFalse(daemon.lighting_engine.get_status()["running"])
+            self.assertEqual(daemon.wmi.calls[-1][1], 20)
+            self.assertEqual(daemon.wmi.calls[-1][2][0], 0)   # STATIC
+            self.assertEqual(daemon.wmi.calls[-1][2][1], 0)   # speed 0
         finally:
             psensed._save_lighting_state = orig_save
             psensed._load_lighting_state = orig_load

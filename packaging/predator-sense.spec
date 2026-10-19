@@ -24,7 +24,7 @@
 
 Name:           predator-sense
 Version:        5.0.1463
-Release:        8%{?dist}
+Release:        9%{?dist}
 Summary:        Acer Predator control for Linux (daemon, CLI, exact-clone GUI)
 
 License:        GPL-2.0-or-later
@@ -206,6 +206,21 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
+* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-9
+- psensed: BREATHING/SHIFTING/METEOR/TWINKLING (and NEON→SHIFTING alias) are
+  now EC-native: one 16-B controller-layout frame per change, the EC animates
+  autonomously — the userspace engine burned ~0.3 core feeding ~18 zone-write
+  SMM evals/s for the identical visual result (ledger §13.36); WAVE/RAINBOW
+  and reactive SCREEN/MUSIC stay on the software engine
+- psensed: kb.set/kb.effect frames moved to the AcerECKeyboardController
+  layout ([3]=dir+1, RGB at [4..6]) — the old shifted layout placed the blue
+  channel on the on-flag byte, which is what actually caused the historic
+  "animated modes drop the backlight" behavior
+- psensed: kb.effect.stop/kb.zone.set/kb.restore now retire any EC-native
+  frame with a mode-0 write (EC frame registers persist across restarts)
+- psensed: kb.get state readout recalibrated to the live echo slot map
+  ([1]=mode [2]=speed [3]=brightness [4]=dir [5..7]=frame RGB [6..8]=zone RGB)
+
 * Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-8
 - psensed: dedupe repeated kb.zone.set writes against an EC palette cache
   (animated frame storms from old/spawned GUI instances evaluated 1.15 SMM
