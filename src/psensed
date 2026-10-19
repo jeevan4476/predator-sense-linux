@@ -65,6 +65,10 @@ import threading
 import time
 import ipaddress
 
+# Ensure modules in /usr/lib/predator-sense or local source directory can be imported
+sys.path.insert(0, "/usr/lib/predator-sense")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from psensed_lighting import DaemonLightingEngine, clamp_rgb
 from psensed_gpu_oc import GpuOverclockManager
 

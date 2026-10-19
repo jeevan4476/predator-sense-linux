@@ -17,13 +17,13 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir "$STAGE/predator-sense-$VER"
 tar -C "$REPO" -cf - --exclude 'src/psense-electron/debug' --exclude '.git' \
-        src/psense src/psensed \
+        src/psense src/psensed src/psensed_lighting.py src/psensed_gpu_oc.py \
         src/psense-wmi \
         packaging/psensed.service packaging/predator-sense.desktop \
         packaging/install.sh packaging/gen-icon.py \
         packaging/predator-sense-icon.png packaging/predator-sense.spec \
         packaging/predator-sense.rpmlintrc packaging/man \
-        packaging/make-tar.sh scripts \
+        packaging/make-tar.sh scripts tests \
         LICENSE README.md CONTRIBUTING.md spec docs/shots \
         src/psense-electron/app src/psense-electron/backend.js \
         src/psense-electron/main.js src/psense-electron/preload.js \

@@ -24,7 +24,7 @@
 
 Name:           predator-sense
 Version:        5.0.1463
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        Acer Predator control for Linux (daemon, CLI, exact-clone GUI)
 
 License:        GPL-2.0-or-later
@@ -112,6 +112,9 @@ install -Dm755 src/psense  %{buildroot}%{_bindir}/psense
 install -Dm755 src/psensed %{buildroot}%{_sbindir}/psensed
 install -Dm755 scripts/psense-purified-voice.sh %{buildroot}%{_bindir}/psense-purified-voice
 install -Dm755 scripts/psense-ai-charging.py    %{buildroot}%{_bindir}/psense-ai-charging
+install -d %{buildroot}%{_prefix}/lib/predator-sense
+install -Dm644 src/psensed_lighting.py %{buildroot}%{_prefix}/lib/predator-sense/psensed_lighting.py
+install -Dm644 src/psensed_gpu_oc.py   %{buildroot}%{_prefix}/lib/predator-sense/psensed_gpu_oc.py
 
 # ---------- systemd unit ----------
 install -Dm644 packaging/psensed.service %{buildroot}%{_unitdir}/psensed.service
@@ -150,7 +153,7 @@ install -Dm644 packaging/predator-sense.desktop \
     %{buildroot}%{_datadir}/applications/predator-sense.desktop
 
 %check
-python3 -m py_compile src/psense src/psensed scripts/psense-ai-charging.py
+python3 -m py_compile src/psense src/psensed src/psensed_lighting.py src/psensed_gpu_oc.py scripts/psense-ai-charging.py
 test -s src/psense-wmi/psense-wmi.ko
 test -s packaging/predator-sense-icon.png
 
@@ -161,6 +164,8 @@ test -s packaging/predator-sense-icon.png
 %{_bindir}/psense-purified-voice
 %{_bindir}/psense-ai-charging
 %{_sbindir}/psensed
+%dir %{_prefix}/lib/predator-sense
+%{_prefix}/lib/predator-sense/*
 %{_unitdir}/psensed.service
 %{_mandir}/man1/psense.1*
 %{_mandir}/man8/psensed.8*
@@ -194,6 +199,13 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
+* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-7
+- Align Linux architecture with Windows OEM reverse-engineered services
+- Move dynamic lighting animation engine (Wave, Breathing, Meteor, etc.) into psensed
+- Add 24/7 background lighting persistence across reboots with zero GUI dependency
+- Add psense kb effect CLI command for full terminal lighting control
+- Wire OEM profile GPU overclocking (+100MHz Core / +200MHz VRAM) on Turbo mode
+
 * Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-6
 - Fix EADDRINUSE 15150 crash by adding Electron single-instance locking
 - Auto-restore and focus existing window on second instance launch
