@@ -1007,7 +1007,12 @@ const HANDLERS = {
         getSupportAudioMode: () => [0, 1, 2, 3, 4, 5, 6, 10],       // d0.*
         getSupportLCDOverdrive: () => true,
         getSupportGPUMode: () => loadKV()["GPUMode"] ?? 0,
-        getSupportGPUModeCapability: () => 7,
+        // Capability 7 advertised Optimus/MSHybrid/Discrete switching, but no
+        // mux mechanism exists on PHN16-71 Linux (see analysis/wmi-methods.md
+        // — no display-switch WMI method); every write was a KV placebo.
+        // Capability 0 hides the selector like Windows does on non-mux
+        // models; Optimus routing is the (correct) driver default.
+        getSupportGPUModeCapability: () => 0,
         getSupportBootLogo: () => false,
         // their CPU/GPU info rings read data[0].cpu_name/cpu_max_frequency(MHz)
         getSupportCPUInfo: () => {
@@ -1110,7 +1115,17 @@ HANDLERS.util = new Proxy(HANDLERS.util, {
     },
 });
 
-// generate the KV get/set pairs on HANDLERS.info
+// Generate the KV get/set pairs on HANDLERS.info.
+// Bridge first: ddsc-table.json exposes getSwitchKey/setSwitchKey under
+// `info` (lines 83/124) while the daemon-backed implementations live under
+// `appCenter` (switchkey.set/get → acer_wmi cycle_gaming_thermal_profile).
+// Without this the auto-generated KV stubs below swallow the button click
+// and only rewrite the KV file.
+for (const fn of ["setSwitchKey", "getSwitchKey"]) {
+    if (HANDLERS.info[fn] === undefined && HANDLERS.appCenter?.[fn]) {
+        HANDLERS.info[fn] = (a) => HANDLERS.appCenter[fn](a);
+    }
+}
 for (const [key, setFn, getFn, def] of KV_PAIRS) {
     if (!HANDLERS.info[setFn]) {
         HANDLERS.info[setFn] = (a) => {
@@ -1236,8 +1251,11 @@ function netRates() {
             for (const [name, v] of Object.entries(cur)) {
                 const prev = lastNet.d[name];
                 if (!prev) continue;
-                const drx = Math.max(0, v.rx - prev.rx) / dt / 1024;   // KB/s
-                const dtx = Math.max(0, v.tx - prev.tx) / dt / 1024;
+                const drx = Math.max(0, v.rx - prev.rx) / dt * 0.008;   // kbit/s
+                const dtx = Math.max(0, v.tx - prev.tx) / dt * 0.008;
+                // Vendor unit contract: the UI divides by 1000 and labels
+                // results "Kbps"/"Mbps" — it expects kiloBITS/s, while
+                // /proc/net/dev counts BYTES (the old /1024 base was 8.19× low).
                 const wifi = name.startsWith("w") || name.startsWith("W");
                 const eth = name.startsWith("e") || name.startsWith("E");
                 if (wifi) { out.wifi_down += drx; out.wifi_up += dtx; }
@@ -1310,6 +1328,12 @@ function cpuCoreCount() {
 async function buildMonitorData(sensors, fans, cpu) {
     const temps = sensors && !sensors.error ? sensors.temps ?? {} : {};
     const rpm = sensors && !sensors.error ? sensors.fans_rpm ?? {} : {};
+    // Two frequency snapshots straddle the awaits below (~200-400 ms apart);
+    // per-core max keeps a bursty boosted core from being undersampled at
+    // ~400 MHz idle clocks (the single-snapshot mean read ~2.1 GHz under
+    // load while actual boosts reached 4.3-4.6 GHz). The busy-weighted
+    // aggregation still mirrors their _Total "% Processor Performance".
+    const freqsA = cpuCoreFreqsMHz();
     const gpu = await nvidiaState();
     const net = netRates();
     const mi = (() => {
@@ -1318,7 +1342,10 @@ async function buildMonitorData(sensors, fans, cpu) {
     const memTotalKB = Number(mi.match(/^MemTotal:\s+(\d+)/m)?.[1]) || 0;
     const memAvailKB = Number(mi.match(/^MemAvailable:\s+(\d+)/m)?.[1]) || 0;
     const ramUsage = memTotalKB ? Math.round((1 - memAvailKB / memTotalKB) * 1000) / 10 : 0;
-    const freqs = cpuCoreFreqsMHz();
+    const freqsB = cpuCoreFreqsMHz();
+    const freqs = (freqsA && freqsB)
+        ? freqsB.map((v, i) => Math.max(v, freqsA[i] ?? 0))
+        : (freqsB ?? freqsA);
     const data = {
         timeStamp: new Date(),
         CPU_CORE_AMOUNT: cpuCoreCount(),
@@ -1346,8 +1373,19 @@ async function buildMonitorData(sensors, fans, cpu) {
     return data;
 }
 
-function notifyModeChange(mode) {
+const _modeNotify = { at: 0, mode: null, suppress: 0 };
+
+function notifyModeChange(mode, opts = {}) {
     try {
+        // Dedupe: one share of state reaches the pump and the apply path;
+        // without this a single key press fired 2 toasts, and the DC clamp
+        // whispered "Balanced" right after a Turbo press. ≥4 s between
+        // like-mode toasts; clamped fallbacks never toast (opts.suppress).
+        const now = Date.now();
+        if (mode === _modeNotify.mode && now - _modeNotify.at < 4000) return;
+        if (opts.suppress) { _modeNotify.mode = mode; _modeNotify.at = now; return; }
+        _modeNotify.mode = mode;
+        _modeNotify.at = now;
         const MODE_NAMES = { 0: "Quiet", 1: "Balanced", 2: "Eco", 4: "Performance", 5: "Turbo", 6: "Eco" };
         const name = MODE_NAMES[mode] ?? `Mode ${mode}`;
         new Notification({
@@ -1447,6 +1485,9 @@ async function pumpOnce() {
                 log(`battery mode clamp: ${prof.profile} -> balanced on DC`);
                 await daemonCall("profile.set", { name: "balanced" });
                 m = 1;
+                // A Turbo→Balanced fallback is not a mode the user picked:
+                // record it silently so the pump does not toast it either.
+                notifyModeChange(m, { suppress: true });
             }
             if (setIfChanged("OPERATING_MODE", m)) {
                 notifyModeChange(m);
@@ -1966,6 +2007,10 @@ async function applyPssdkWrite(key, data) {
             const p = MODE_TO_PROFILE[data];
             if (p) {
                 await daemonCall("profile.set", { name: p });
+                // Seed the store BEFORE notifying: the pump compares against
+                // this store, so an unseeded store made the pump fire a
+                // second toast for the same press.
+                setIfChanged("OPERATING_MODE", data);
                 notifyModeChange(data);
             }
             return;

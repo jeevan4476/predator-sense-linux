@@ -296,6 +296,12 @@ class Daemon:
         self.wmi_conn = None
         self.wmi_started = 0.0
         self._last_lighting_zones = None
+        # Last column of per-zone colors committed directly by kb.zone.set
+        # (zone_bit → (r,g,b)). Animated kb.set/kb.effect frames bypass the
+        # zone store, so any of those ops invalidates this cache — it must
+        # never suppress a repaint that follows an animation or a manual
+        # frame write.
+        self._ec_zone_colors = {}
         self.lighting_engine = DaemonLightingEngine(self._apply_lighting_frame)
         threading.Thread(target=self._wmi_worker, name="psensed-wmi", daemon=True).start()
         # restore keyboard lighting if previous state was persisted
@@ -477,6 +483,7 @@ class Daemon:
 
             if name == "kb.effect.set":
                 eff = args.get("effect")
+                self._ec_zone_colors.clear()   # animation repaints will bypass the zone store
                 if not eff:
                     return {"error": "effect is required (BREATHING, WAVE, SHIFTING, METEOR, TWINKLING)"}
                 speed = args.get("speed", 3)
@@ -500,6 +507,7 @@ class Daemon:
 
             if name == "kb.effect.stop":
                 self.lighting_engine.stop_effect()
+                self._ec_zone_colors.clear()   # EC now shows the last animated frame
                 _save_lighting_state({"op": "kb.effect.stop", "args": {}})
                 return {"status": 0, "stopped": True}
 
@@ -507,8 +515,14 @@ class Daemon:
                 return {"status": 0, "effect": self.lighting_engine.get_status()}
 
             if name == "kb.zone.set":
-                # Static zone write yields dynamic lighting
+                # Static zone write yields dynamic lighting.
+                # EC palette dedupe: an old client (or several concurrently
+                # running GUI instances) can re-send the identical palette
+                # continuously; every duplicate costs a 0.2-0.9 s SMM eval on
+                # the serialized worker and keeps the CPU/persona busy. Only
+                # zones whose direct zone color actually changes are written.
                 self.lighting_engine.stop_effect()
+                self._ec_zone_colors.clear()   # stop_effect may repaint zones
                 rgb = args.get("rgb", [0, 0, 0])
                 try:
                     r, g, b = (max(0, min(255, int(x))) for x in rgb)
@@ -525,15 +539,21 @@ class Daemon:
                     if not nums or any(n not in (1, 2, 3, 4) for n in nums):
                         return {"error": "zones: list of 1..4 or 'all'"}
                     bits = tuple(1 << (n - 1) for n in nums)
+                todo = [zb for zb in bits if self._ec_zone_colors.get(zb) != (r, g, b)]
+                if not todo:
+                    return {"zones": [f"kb-zone-{i+1}" for i in range(len(bits))],
+                            "applied": [], "skipped": "palette unchanged"}
                 applied = []
-                for zb in bits:
+                for zb in todo:
                     if applied:
                         time.sleep(WRITE_GAP)  # extra spacing beyond kernel pacing
                     status, data = w.eval("gaming", 6, _u64(zb, r, g, b), 4)
                     applied.append({"zone_bit": zb, "status": status})
+                    if status == 0:
+                        self._ec_zone_colors[zb] = (r, g, b)
                 if all(a.get("status") == 0 for a in applied):
                     _save_lighting_state({"op": "kb.zone.set", "args": args})
-                return {"zones": [f"kb-zone-{i+1}" for i in range(len(applied))], "applied": applied}
+                return {"zones": [f"kb-zone-{i+1}" for i in range(len(bits))], "applied": applied}
 
             if name == "kb.set":
                 self.lighting_engine.stop_effect()
@@ -553,6 +573,7 @@ class Daemon:
                 frame = bytes([mode, speed, bri, 0x00, direction & 0xFF,
                                r, g, b, 0x03, device, 0, 0, 0, 0, 0, 0])
                 status, data = w.eval("gaming", 20, frame, 4)
+                self._ec_zone_colors.clear()   # 16-B frame does not update the zone store
                 if status == 0:
                     _save_lighting_state({"op": "kb.set", "args": args})
                 return {"status": status, "ack": data.hex(), "frame": frame.hex()}

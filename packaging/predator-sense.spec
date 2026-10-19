@@ -24,7 +24,7 @@
 
 Name:           predator-sense
 Version:        5.0.1463
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        Acer Predator control for Linux (daemon, CLI, exact-clone GUI)
 
 License:        GPL-2.0-or-later
@@ -206,6 +206,22 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
+* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-8
+- psensed: dedupe repeated kb.zone.set writes against an EC palette cache
+  (animated frame storms from old/spawned GUI instances evaluated 1.15 SMM
+  writes/s forever and burned 30-40% daemon CPU) with invalidation on
+  kb.set/kb.effect.set/stop so repaints after animations stay correct
+- backend: route Mode Switch Key info.* calls to the daemon-backed
+  appCenter handlers (button previously only rewrote the KV file)
+- backend: network rates are now kiloBITS/s as the vendor unit logic
+  expects (was KiB/s: reading was 8.19x low)
+- backend: notifyModeChange cooldown + apply-path store seeding and DC
+  clamp suppression (was 2-3 toasts per key press including wrong ones)
+- backend: CPU clock aggregation samples frequency twice per tick and
+  takes the per-core max before busy-weighting (was damped to ~2.1 GHz)
+- backend: advertise GPU mux capability 0 (no mux mechanism on this
+  platform; the selector was a KV placebo)
+
 * Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-7
 - Align Linux architecture with Windows OEM reverse-engineered services
 - Move dynamic lighting animation engine (Wave, Breathing, Meteor, etc.) into psensed

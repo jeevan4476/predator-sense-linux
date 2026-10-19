@@ -172,7 +172,13 @@ rpmbuild -bb packaging/predator-sense.spec \
 # 2. Verify RPM compliance (0 errors, 0 warnings)
 rpmlint -r packaging/predator-sense.rpmlintrc packaging/predator-sense.spec dist/rpm/x86_64/*.rpm
 
-# 3. Install the packages
+# 3. Install the packages.
+#    dist/rpm/x86_64 accumulates one trio per Release ever built — installing
+#    several versions of the same package in one transaction fails to resolve,
+#    so keep only the current Release trio in that directory (archive or
+#    delete older *.rpm first). A plain dnf install then upgrades @System:
+#      mkdir -p dist/rpm/archive && mv dist/rpm/x86_64/*.rpm dist/rpm/archive/
+#      # …then rebuild (step 1-2) or copy back the trio you want to install.
 sudo dnf install -y dist/rpm/x86_64/predator-sense{,-gui,-kmod}-*.rpm
 
 # 4. Enable and start the background daemon
