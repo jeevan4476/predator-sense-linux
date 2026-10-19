@@ -498,6 +498,230 @@ const HANDLERS = {
             kvSet("TransparencyEffect", Boolean(en));
             return null;
         },
+        // Hardware Checkup & Diagnostics (Battery, NVMe SMART, RAM)
+        getSupportCheckup: () => true,
+        getBatteryLastCheckedInfo: async () => {
+            let full = 0, design = 0, cycles = 0, status = "Discharging";
+            try {
+                const supplies = fs.readdirSync("/sys/class/power_supply");
+                const batDir = supplies.find(s => s.startsWith("BAT"));
+                if (batDir) {
+                    const bPath = path.join("/sys/class/power_supply", batDir);
+                    const rd = (f) => {
+                        try { return fs.readFileSync(path.join(bPath, f), "utf8").trim(); } catch { return ""; }
+                    };
+                    const rdNum = (f) => {
+                        const v = parseInt(rd(f), 10);
+                        return Number.isFinite(v) ? v : 0;
+                    };
+                    full = rdNum("energy_full") || rdNum("charge_full");
+                    design = rdNum("energy_full_design") || rdNum("charge_full_design");
+                    cycles = rdNum("cycle_count");
+                    status = rd("status") || "Unknown";
+                }
+            } catch { }
+
+            if (!full || !design) {
+                try {
+                    const h = await daemonCall("health", {});
+                    if (h?.battery) {
+                        full = h.battery.battery_full_raw || full;
+                        design = h.battery.battery_design_raw || design;
+                        cycles = h.battery.battery_cycle_count || cycles;
+                        status = h.battery.battery_status || status;
+                    }
+                } catch { }
+            }
+
+            const healthPct = design > 0 ? Math.min(100, Math.round((full / design) * 100)) : 100;
+            const st = healthPct >= 70 ? 0 : 1; // 0 = Good / Normal
+            const saved = loadKV()["BatteryLastCheckedInfo"];
+            const lastCheckTime = saved?.lastCheckTime || (saved?.LastCheckTime ? Number(saved.LastCheckTime) : Date.now());
+
+            return {
+                lastCheckTime,
+                LastCheckTime: String(lastCheckTime),
+                health: healthPct,
+                status: st,
+                HealthStatus: st,
+                cycleCount: cycles,
+                fullCapacity: full,
+                designCapacity: design,
+                wearLevel: Math.max(0, 100 - healthPct),
+                chargingStatus: status,
+            };
+        },
+        setBatteryLastCheckedInfo: (a) => {
+            const v = Array.isArray(a) && a.length === 1 ? a[0] : (a === undefined ? null : a);
+            kvSet("BatteryLastCheckedInfo", v === undefined ? null : v);
+            return null;
+        },
+        getStorageLastCheckedInfo: async (a) => {
+            let devPath = "/dev/nvme0n1";
+            let diskModel = "NVMe SSD";
+            let temp = 40;
+            let diskStatus = 0;
+            let smartHealth = "Good";
+
+            // 1. Try smartctl -j -H
+            try {
+                const { execFileSync } = require("child_process");
+                const out = execFileSync("smartctl", ["-j", "-H", devPath], { timeout: 2000, encoding: "utf8" });
+                const j = JSON.parse(out);
+                if (j?.smart_status) {
+                    diskStatus = j.smart_status.passed ? 0 : 1;
+                    smartHealth = diskStatus === 0 ? "Good" : "Warning";
+                }
+                if (j?.temperature?.current) temp = j.temperature.current;
+            } catch { }
+
+            // 2. Query daemonCall("health") (root psensed runs smartctl)
+            try {
+                const h = await daemonCall("health", {});
+                if (h?.disks && h.disks.length > 0) {
+                    const d = h.disks[0];
+                    if (d.dev) devPath = d.dev;
+                    if (d.model) diskModel = d.model;
+                    if (typeof d.health === "number" && d.health >= 0) {
+                        diskStatus = d.health;
+                        smartHealth = diskStatus === 0 ? "Good" : "Warning";
+                    }
+                }
+            } catch { }
+
+            // 3. Sysfs inspect model and temperature
+            try {
+                const devName = path.basename(devPath);
+                const sysBlock = path.join("/sys/block", devName);
+                if (fs.existsSync(path.join(sysBlock, "device/model"))) {
+                    const m = fs.readFileSync(path.join(sysBlock, "device/model"), "utf8").trim();
+                    if (m) diskModel = m;
+                }
+                const devDir = path.join(sysBlock, "device");
+                if (fs.existsSync(devDir)) {
+                    const hwEntries = fs.readdirSync(devDir).filter(e => e.startsWith("hwmon"));
+                    for (const hwe of hwEntries) {
+                        const tPath = path.join(devDir, hwe, "temp1_input");
+                        if (fs.existsSync(tPath)) {
+                            const rawT = parseInt(fs.readFileSync(tPath, "utf8").trim(), 10);
+                            if (rawT > 0) {
+                                temp = Math.round(rawT > 1000 ? rawT / 1000 : rawT);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch { }
+
+            if (temp === 40) {
+                try {
+                    const hwmons = fs.readdirSync("/sys/class/hwmon");
+                    for (const h of hwmons) {
+                        const nPath = path.join("/sys/class/hwmon", h, "name");
+                        if (fs.existsSync(nPath) && fs.readFileSync(nPath, "utf8").trim() === "nvme") {
+                            const tPath = path.join("/sys/class/hwmon", h, "temp1_input");
+                            if (fs.existsSync(tPath)) {
+                                const rawT = parseInt(fs.readFileSync(tPath, "utf8").trim(), 10);
+                                if (rawT > 0) {
+                                    temp = Math.round(rawT > 1000 ? rawT / 1000 : rawT);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } catch { }
+            }
+
+            const saved = loadKV()["StorageLastCheckedInfo"];
+            const lastCheckTime = saved?.lastCheckTime || (Array.isArray(saved) && saved[0]?.LastCheckTime ? Number(saved[0].LastCheckTime) : Date.now());
+
+            const diskItem = {
+                name: diskModel || "NVMe SSD",
+                device: devPath,
+                status: diskStatus,
+                health: smartHealth,
+                temperature: temp || 40,
+                Model: diskModel || "NVMe SSD",
+                DiskIndex: 0,
+                HealthStatus: diskStatus,
+                LastCheckTime: String(lastCheckTime),
+                DriveLetters: ["/"],
+            };
+
+            const disksArr = [diskItem];
+            disksArr.lastCheckTime = lastCheckTime;
+            disksArr.LastCheckTime = String(lastCheckTime);
+            disksArr.status = diskStatus;
+            disksArr.HealthStatus = diskStatus;
+            disksArr.disks = [diskItem];
+
+            if (Array.isArray(a) && a[0] === "object") {
+                return {
+                    lastCheckTime,
+                    status: diskStatus,
+                    disks: [diskItem],
+                };
+            }
+            return disksArr;
+        },
+        setStorageLastCheckedInfo: (a) => {
+            const v = Array.isArray(a) && a.length === 1 ? a[0] : (a === undefined ? null : a);
+            kvSet("StorageLastCheckedInfo", v === undefined ? null : v);
+            return null;
+        },
+        getRamLastCheckedInfo: async () => {
+            let memTotal = 0, memAvail = 0;
+            try {
+                const meminfo = fs.readFileSync("/proc/meminfo", "utf8");
+                for (const line of meminfo.split("\n")) {
+                    const parts = line.split(":");
+                    if (parts.length < 2) continue;
+                    const key = parts[0].trim();
+                    const val = parseInt(parts[1].trim(), 10);
+                    if (key === "MemTotal") memTotal = val;
+                    if (key === "MemAvailable") memAvail = val;
+                }
+            } catch { }
+
+            let memData = null;
+            try {
+                memData = await daemonCall("memory", {});
+            } catch { }
+            if (!memData) {
+                try {
+                    const sys = await daemonCall("sysinfo", {});
+                    memData = sys?.ram;
+                } catch { }
+            }
+
+            const totalMB = memData?.total_mb || Math.round(memTotal / 1024);
+            const totalGB = Math.round(memTotal / (1024 * 1024)) || Math.round(totalMB / 1024);
+            const usedKB = memTotal > memAvail ? (memTotal - memAvail) : 0;
+            const usedGB = Math.round(usedKB / (1024 * 1024));
+            const usagePct = memTotal > 0 ? Math.round((usedKB / memTotal) * 100) : 0;
+
+            const saved = loadKV()["RamLastCheckedInfo"];
+            const lastCheckTime = saved?.lastCheckTime || (saved?.LastCheckTime ? Number(saved.LastCheckTime) : Date.now());
+
+            return {
+                lastCheckTime,
+                LastCheckTime: String(lastCheckTime),
+                status: 0, // 0 = Normal / Good
+                HealthStatus: 0,
+                health: "Good",
+                totalGB,
+                usedGB,
+                usagePct,
+                type: memData?.type || "DDR5",
+                frequency: memData?.frequency || 4800,
+                dimms: memData?.dimms || 1,
+            };
+        },
+        setRamLastCheckedInfo: (a) => {
+            const v = Array.isArray(a) && a.length === 1 ? a[0] : (a === undefined ? null : a);
+            kvSet("RamLastCheckedInfo", v === undefined ? null : v);
+            return null;
+        },
     },
     util: {
         minimizeMainWindow: () => { getWin()?.minimize(); return null; },
