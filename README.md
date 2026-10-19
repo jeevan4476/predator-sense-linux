@@ -322,6 +322,27 @@ Contributions are warmly welcome! Whether you are packaging for new distribution
 
 ---
 
+## Source-only distribution policy
+
+This repository ships **code, documentation and analysis evidence only**.
+
+- **Release assets are source archives and documents** — no RPMs, tarballs or
+  other artifacts are attached to GitHub Releases. The locally built RPMs
+  embed the stock Acer renderer (`src/psense-electron/app/`), which is
+  Acer's proprietary property, so those artifacts are produced and kept
+  locally per machine and never redistributed from this project.
+- `src/psense-electron/app/`, `dist/`, `src/psense-electron/debug/`,
+  `analysis/reference/`, `tools/` and `run/` are deliberately **git-ignored**:
+  they contain either proprietary vendor payloads (extracted from *your own*
+  Windows Predator Sense install, which is what `packaging/make-tar.sh`
+  needs to build), local debug captures, or reverse-engineering tooling.
+  To build from source you must extract those assets yourself from an
+  installation you own.
+- Personal machine identifiers (MAC/IP addresses, hostnames, user paths)
+  never enter the repository: evidence snippets in `analysis/` are redacted.
+
+---
+
 ## License
 
 This project is licensed under the **GNU General Public License v2.0 or later** ([GPL-2.0-or-later](LICENSE)).
