@@ -21,7 +21,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SYSTEMD_UNIT=/etc/systemd/system/psensed.service
 
-GUI_ARGS=(app backend.js main.js preload.js ddsc-table.json tls package.json package-lock.json bun.lock node_modules)
+GUI_ARGS=(app backend.js main.js preload.js lighting-engine.js ddsc-table.json tls package.json package-lock.json bun.lock node_modules)
 GUI_EXCLUDE=(debug README.md)
 
 c_freeze() { systemctl stop psensed 2>/dev/null || true; }

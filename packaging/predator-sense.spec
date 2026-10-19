@@ -24,7 +24,7 @@
 
 Name:           predator-sense
 Version:        5.0.1463
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        Acer Predator control for Linux (daemon, CLI, exact-clone GUI)
 
 License:        GPL-2.0-or-later
@@ -128,7 +128,7 @@ install -Dm644 src/psense-wmi/psense-wmi.ko \
 
 # ---------- GUI payload (bundled Electron + renderer) ----------
 mkdir -p %{buildroot}%{appdir}
-for item in app backend.js main.js preload.js ddsc-table.json tls \
+for item in app backend.js main.js preload.js lighting-engine.js ddsc-table.json tls \
             package.json package-lock.json bun.lock node_modules; do
     cp -a src/psense-electron/$item %{buildroot}%{appdir}/
 done
@@ -194,6 +194,13 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
+* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-4
+- Fix adaptor and battery boost event payloads for seamless DC mode switching
+- Add userspace Pulsar Dynamic Lighting Engine for 4-zone RGB keyboards
+- Wire Power-off USB charging and battery threshold to WMI APGe
+- Implement real hardware diagnostics (Battery wear, NVMe SMART, RAM)
+- Add floating in-game desktop mini widget overlay with system tray toggle
+
 * Mon Oct 19 2026 Predator Sense Linux <psense@localhost.invalid> - 5.0.1463-3
 - Add keyboard backlight persistence across GUI restarts via /var/lib/predator-sense/lighting.json
 - Add Electron System Tray integration with quick mode/fan switcher and hide-to-tray on close
