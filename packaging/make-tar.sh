@@ -24,7 +24,7 @@ tar -C "$REPO" -cf - --exclude 'src/psense-electron/debug' --exclude '.git' \
         packaging/predator-sense-icon.png packaging/predator-sense.spec \
         packaging/predator-sense.rpmlintrc packaging/man \
         packaging/make-tar.sh scripts \
-        LICENSE README.md spec docs/shots \
+        LICENSE README.md CONTRIBUTING.md spec docs/shots \
         src/psense-electron/app src/psense-electron/backend.js \
         src/psense-electron/main.js src/psense-electron/preload.js \
         src/psense-electron/lighting-engine.js \

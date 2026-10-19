@@ -24,7 +24,7 @@
 
 Name:           predator-sense
 Version:        5.0.1463
-Release:        4%{?dist}
+Release:        5%{?dist}
 Summary:        Acer Predator control for Linux (daemon, CLI, exact-clone GUI)
 
 License:        GPL-2.0-or-later
@@ -156,7 +156,7 @@ test -s packaging/predator-sense-icon.png
 
 %files
 %license LICENSE
-%doc README.md spec
+%doc README.md CONTRIBUTING.md spec
 %{_bindir}/psense
 %{_bindir}/psense-purified-voice
 %{_bindir}/psense-ai-charging
@@ -194,6 +194,13 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
+* Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-5
+- Open-source preparation: 100% offline privacy shield, blocked telemetry
+- Neutralize Acer Account login and registration dead ends
+- Universal DMI hardware detection across Predator & Nitro models
+- Add psense checkup terminal diagnostic and psense ui launcher
+- Comprehensive open-source README and CONTRIBUTING documentation
+
 * Mon Oct 19 2026 Antigravity <antigravity@local> - 5.0.1463-4
 - Fix adaptor and battery boost event payloads for seamless DC mode switching
 - Add userspace Pulsar Dynamic Lighting Engine for 4-zone RGB keyboards
