@@ -5,3 +5,8 @@ dist/
 **/__pycache__/
 .superpowers/
 src/psense-electron/app/
+# local-only build/RE helper trees and runtime captures — never publish
+src/psense-electron/debug/
+analysis/reference/
+tools/
+run/
