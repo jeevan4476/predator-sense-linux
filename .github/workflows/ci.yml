@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    # Run the daemon/CLI/GPU-OC python tests and the backend node tests.
+    # Source-only CI: no RPM build here — the packaged payload needs
+    # src/psense-electron/app/, which is deliberately not in the repo
+    # (see README §Source-only distribution policy).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: python tests (daemon, cli lighting, gpu-oc)
+        run: |
+          python3 -m unittest tests.test_cli_lighting \
+                              tests.test_lighting_engine \
+                              tests.test_gpu_oc
+      - name: syntax-check electron shims
+        run: |
+          node --check src/psense-electron/backend.js
+          node --check src/psense-electron/main.js
+          node --check src/psense-electron/lighting-engine.js
+      - name: backend(node) tests
+        run: node --test tests/test_backend_lighting.js

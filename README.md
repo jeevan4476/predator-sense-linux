@@ -340,6 +340,8 @@ This repository ships **code, documentation and analysis evidence only**.
   installation you own.
 - Personal machine identifiers (MAC/IP addresses, hostnames, user paths)
   never enter the repository: evidence snippets in `analysis/` are redacted.
+- **Branch model**: `master` carries the full development history; `main`
+  holds only release snapshots (one squash commit + tag per release).
 
 ---
 
