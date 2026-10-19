@@ -10,7 +10,7 @@ High-performance, complete native Linux control center for **Acer Predator & Nit
 
 Predator Sense Linux brings full hardware telemetry, thermal mode switching, advanced fan curves, 4-zone and per-key RGB lighting animations, battery care thresholds, and AI audio noise suppression to Linux—mirroring and expanding upon the official OEM Windows suite while remaining **100% offline and free of proprietary telemetry**.
 
-![Predator Sense Linux Dashboard](docs/shots/home-live.png)
+![Predator Sense Linux Dashboard](assets/home-live.png)
 
 ---
 
