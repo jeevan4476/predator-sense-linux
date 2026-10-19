@@ -60,9 +60,9 @@ function seedStore() {
     for (const [k, v] of Object.entries(seeds)) pssdkStore.set(k, v);
 }
 
-/* Ye enum: QUIET=0 DEFAULT=1 EXTREME=4 TURBO=5 ECO=6 → platform_profile */
+/* Ye enum: QUIET=0 DEFAULT=1 EXTREME=4 TURBO=5 ECO=6 (or 2) → platform_profile */
 const MODE_TO_PROFILE = {
-    0: "quiet", 1: "balanced", 4: "balanced-performance",
+    0: "quiet", 1: "balanced", 2: "low-power", 4: "balanced-performance",
     5: "performance", 6: "low-power",
 };
 const PROFILE_TO_MODE = {
@@ -503,13 +503,18 @@ const HANDLERS = {
                 // and saves scenario so ScenarioChanged broadcasts to renderer GTe.
                 // Without this, lc.currentMode keeps reading stale CurrentProfile.opMode
                 // and the clicked mode plate never highlights in the UI (§13.31).
-                pssdkStore.set(k, data);
+                const m = Number(data);
+                const isDc = readAcOnline() === false;
+                if (isDc && !(m === 0 || m === 1 || m === 2 || m === 6)) {
+                    log(`OPERATING_MODE ${m} rejected on DC (only 0=Quiet, 1=Balanced, 2/6=Eco allowed)`);
+                    return null;
+                }
+                pssdkStore.set(k, m);
                 try {
                     const s = loadScenario();
                     const p = s?.profiles?.[s.active];
                     if (p) {
-                        const m = Number(data);
-                        if (readAcOnline() === false) {
+                        if (isDc) {
                             p.dcMode = m;
                         } else {
                             p.opMode = m;
@@ -518,6 +523,9 @@ const HANDLERS = {
                         saveScenario();
                     }
                 } catch (e) { log("scenario opMode save failed:", e.message); }
+                emit(k, m);
+                await applyPssdkWrite(k, m);
+                return null;
             } else if (k === "FAN_CONTROL") {
                 pssdkStore.set(k, data);
                 try {
@@ -557,13 +565,18 @@ const HANDLERS = {
                 return null;
             }
             if (k === "OPERATING_MODE") {
-                pssdkStore.set(k, data);
+                const m = Number(data);
+                const isDc = readAcOnline() === false;
+                if (isDc && !(m === 0 || m === 1 || m === 2 || m === 6)) {
+                    log(`setDataWithoutScenario OPERATING_MODE ${m} rejected on DC`);
+                    return null;
+                }
+                pssdkStore.set(k, m);
                 try {
                     const s = loadScenario();
                     const p = s?.profiles?.[s.active];
                     if (p) {
-                        const m = Number(data);
-                        if (readAcOnline() === false) {
+                        if (isDc) {
                             p.dcMode = m;
                         } else {
                             p.opMode = m;
@@ -572,8 +585,8 @@ const HANDLERS = {
                         saveScenario();
                     }
                 } catch (e) { log("scenario dcMode save failed:", e.message); }
-                emit(k, data);
-                await applyPssdkWrite(k, data);
+                emit(k, m);
+                await applyPssdkWrite(k, m);
                 return null;
             }
             pssdkStore.set(k, data);
@@ -777,11 +790,18 @@ function ramUsagePct() {
     } catch { return null; }
 }
 
-function setIfChanged(key, v) {
+function setIfChanged(key, v, emitPayload) {
     const prev = pssdkStore.get(key);
     if (JSON.stringify(prev) === JSON.stringify(v)) return false;
     pssdkStore.set(key, v);
-    emit(key, v);
+    if (emitPayload === false) return true;
+    if (emitPayload !== undefined) {
+        emit(key, emitPayload);
+    } else if (key === "BATTERY_BOOST") {
+        emit(key, { status: v });
+    } else {
+        emit(key, v);
+    }
     return true;
 }
 
@@ -928,7 +948,7 @@ async function buildMonitorData(sensors, fans, cpu) {
 
 function notifyModeChange(mode) {
     try {
-        const MODE_NAMES = { 0: "Quiet", 1: "Balanced", 4: "Performance", 5: "Eco (Low Power)", 6: "Turbo" };
+        const MODE_NAMES = { 0: "Quiet", 1: "Balanced", 2: "Eco", 4: "Performance", 5: "Turbo", 6: "Eco" };
         const name = MODE_NAMES[mode] ?? `Mode ${mode}`;
         new Notification({
             title: "PredatorSense",
@@ -966,7 +986,8 @@ async function activateProfile(p) {
     if (!p) return;
     try {
         const acOn = readAcOnline();
-        const mode = (acOn === false && typeof p.dcMode === "number") ? p.dcMode : (p.opMode ?? 1);
+        let mode = acOn === false ? (p.dcMode ?? 1) : (p.opMode ?? 1);
+        if (acOn === false && (mode === 4 || mode === 5)) mode = 1;
         await applyPssdkWrite("OPERATING_MODE", mode);
         if (p.fanControl) await applyPssdkWrite("FAN_CONTROL", p.fanControl);
         if (p.lighting) await applyPssdkWrite("LIGHTING", p.lighting);
@@ -1012,7 +1033,9 @@ async function pumpOnce() {
                     setIfChanged(`${k.slice(4).toUpperCase()}_FANSPEED`, Number(v));
             }
         }
-        setIfChanged("BATTERY_BOOST", boost);   // Scenario mode-plate gate
+        if (setIfChanged("BATTERY_BOOST", boost, false)) {
+            emit("BATTERY_BOOST", { status: boost });
+        }
         if (prof && !prof.error && prof.profile) {
             let m = PROFILE_TO_MODE[prof.profile] ?? pssdkStore.get("OPERATING_MODE") ?? 1;
             // Battery safety clamp: high-power modes (balanced-performance 4, performance 5)
@@ -1046,7 +1069,9 @@ async function pumpOnce() {
             }
         }
         if (acOn !== null) {
-            if (setIfChanged("ADAPTOR_STATUS", acOn ? 1 : 0)) emit("ADAPTOR_CHANGED", acOn ? 1 : 0);
+            if (setIfChanged("ADAPTOR_STATUS", acOn ? 1 : 0)) {
+                emit("ADAPTOR_CHANGED", { status: acOn ? 1 : 0 });
+            }
         }
         // Game / App Profile auto-switching
         try {
