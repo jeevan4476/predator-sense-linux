@@ -42,6 +42,8 @@ Ops (request = one JSON object + '\n', reply = one JSON object):
   usbcharge.set {enabled?, threshold?}  power-off USB charge write (APGeAction
                                         id 1 SetFunction(0x04|sw<<8|thr<<16), EC-verified) (§13.29)
   profile.get / profile.set {name}            platform-profile drives their 4 modes
+  gpu.oc.get                            GPU overclocking status (OEM profile offsets)
+  gpu.oc.set  {core, mem}               manual GPU core/memory clock offsets
 """
 
 import argparse
@@ -64,6 +66,7 @@ import time
 import ipaddress
 
 from psensed_lighting import DaemonLightingEngine, clamp_rgb
+from psensed_gpu_oc import GpuOverclockManager
 
 CACHE_S = 2.0        # sensor cache TTL
 DEBOUNCE_S = 2.0     # rpm is misleading right after mode writes
@@ -287,6 +290,15 @@ class Daemon:
         self.wmi_q.put(("kb.restore", {}))
         # fan channel → {"points": [(t,pct)...], "last_pct": int|None}
         self.curves = {}
+        self.gpu_oc = GpuOverclockManager()
+        try:
+            p = find_platform_profile()
+            if p:
+                cur_prof = read(f"{p}/profile")
+                if cur_prof:
+                    self.gpu_oc.apply_mode(cur_prof)
+        except Exception:
+            pass
 
     def _apply_lighting_frame(self, zones):
         """Pass computed dynamic lighting zone frame to WMI."""
@@ -815,6 +827,16 @@ class Daemon:
         return {"error": f"unknown op {name!r}"}
 
     def op_profile(self, name, args):
+        if name == "gpu.oc.get":
+            return self.gpu_oc.get_status()
+        if name == "gpu.oc.set":
+            try:
+                core = int(args.get("core", 0))
+                mem = int(args.get("mem", 0))
+            except (TypeError, ValueError):
+                return {"error": "core and mem offsets must be integers"}
+            return self.gpu_oc.set_offsets(core, mem)
+
         p = find_platform_profile()
         if not p:
             return {"error": "platform-profile not found"}
@@ -827,7 +849,8 @@ class Daemon:
                 return {"error": f"invalid choice {val!r}", "choices": choices}
             if not write(f"{p}/profile", val):
                 return {"error": "write failed"}
-            return {"profile": val}
+            oc_res = self.gpu_oc.apply_mode(val)
+            return {"profile": val, "gpu_oc": oc_res}
         if name == "switchkey.get":
             c = read("/sys/module/acer_wmi/parameters/cycle_gaming_thermal_profile")
             return {"mode": 0 if (c and c.strip().upper() == "Y") else 1}
@@ -836,6 +859,9 @@ class Daemon:
             val = "Y" if mode == 0 else "N"
             ok = write("/sys/module/acer_wmi/parameters/cycle_gaming_thermal_profile", val)
             return {"status": 0 if ok else -1, "mode": mode}
+        return {"error": f"unknown op {name!r}"}
+
+    op_system = op_profile
 
     def op_memory(self, _args=None):     # DPS: SMBIOS type 17 walk (DMI table, root)
         try:
@@ -1343,7 +1369,7 @@ class Daemon:
         name = str(req.get("op", ""))
         if name in ("sensors", "info", "sysinfo", "fan.get", "fan.reset", "fan.mode", "fan.speed"):
             return self._misc(name, {k: v for k, v in req.items() if k != "op"})
-        if name.startswith("profile.") or name.startswith("switchkey."):
+        if name.startswith("profile.") or name.startswith("switchkey.") or name.startswith("gpu.oc."):
             return self.op_profile(name, {k: v for k, v in req.items() if k != "op"})
         if name == "memory":
             return self.op_memory()
