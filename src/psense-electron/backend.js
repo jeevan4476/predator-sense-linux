@@ -78,6 +78,16 @@ function emit(funcName, ...param) {
 }
 function getWin() { return mainWin && !mainWin.isDestroyed() ? mainWin : null; }
 
+let overlayToggler = null;
+function setOverlayToggler(f) { overlayToggler = f; }
+function toggleOverlay(show) {
+    if (typeof overlayToggler === "function") {
+        return overlayToggler(show);
+    }
+}
+let _lastMonitorData = null;
+function getLastMonitorData() { return _lastMonitorData; }
+
 // ------------------------------------------------------------------ psensed
 function daemonCallOnce(op, args, timeout = 6000) {
     return new Promise((resolve) => {
@@ -498,6 +508,11 @@ const HANDLERS = {
             kvSet("TransparencyEffect", Boolean(en));
             return null;
         },
+        openWidgetOverlay: (a) => {
+            const show = Array.isArray(a) ? a[0] : a;
+            toggleOverlay(show !== undefined ? Boolean(show) : true);
+            return true;
+        },
         // Hardware Checkup & Diagnostics (Battery, NVMe SMART, RAM)
         getSupportCheckup: () => true,
         getBatteryLastCheckedInfo: async () => {
@@ -910,7 +925,17 @@ const HANDLERS = {
         },
         setWhisperMode: () => null,
         getWhisperMode: () => false,
-        enableSesenWidget: () => null,
+        enableSesenWidget: (a) => {
+            const show = Array.isArray(a) ? a[0] : a;
+            toggleOverlay(show !== false);
+            return true;
+        },
+        setSesenWidget: (a) => {
+            const show = Array.isArray(a) ? a[0] : a;
+            toggleOverlay(show !== false);
+            return true;
+        },
+        getSesenWidget: () => true,
         // their connected-device list feeds zTe.InitialLighting (device tabs).
         // PHN16-71: EC 4-zone keyboard only (no lightbar/logo/magkey).
         getConnectedDevice: () => [
@@ -968,7 +993,10 @@ const HANDLERS = {
         },
         getAllWidgetApps: () => [],
         setAllWidgetApps: () => null,
-        launchInGameOverlay: () => null,
+        launchInGameOverlay: () => {
+            toggleOverlay(true);
+            return true;
+        },
         launchP9ProclipInstaller: () => null,
         getUserFileInfo: () => null,
 
@@ -1304,7 +1332,9 @@ async function pumpOnce() {
     const acOn = readAcOnline();
     const boost = batteryBoostStatus();
     // monitor panel: broadcast the full native object every tick
-    emit("UPDATE_MONITOR_DATA", await buildMonitorData(sensors, fans, cpu));
+    const monitorData = await buildMonitorData(sensors, fans, cpu);
+    _lastMonitorData = monitorData;
+    emit("UPDATE_MONITOR_DATA", monitorData);
     if (cpu?.usage != null) setIfChanged("CPU_USAGE", cpu.usage);
     const ram = ramUsagePct();
     if (ram != null) setIfChanged("RAM_USAGE", ram);
@@ -1889,4 +1919,7 @@ process.on("exit", shutdown);
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-module.exports = { dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown, lightingEngine, HANDLERS };
+module.exports = {
+    dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown,
+    lightingEngine, HANDLERS, setOverlayToggler, toggleOverlay, getLastMonitorData,
+};

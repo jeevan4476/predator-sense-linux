@@ -12,7 +12,7 @@
  * and answers call_PWARuntime {getAllFuncs, ddsc} by dispatching into
  * backend.js (scenario store + psensed socket ops).
  */
-const { app, BrowserWindow, ipcMain, protocol, net, Tray, Menu, nativeImage, Notification } = require("electron");
+const { app, BrowserWindow, ipcMain, protocol, net, Tray, Menu, nativeImage, Notification, screen } = require("electron");
 const path = require("path");
 const tls = require("tls");
 const http = require("http");
@@ -48,6 +48,8 @@ const WSS_PORT = 15150;   // renderer-side (matches their preload default)
 const WS_PORT = 15151;    // internal loopback for the responder client
 
 let mainWin = null;
+let overlayWin = null;
+let _updateTrayMenu = null;
 
 const URL_PARAMS = {
     "theme": "dark",
@@ -529,6 +531,340 @@ function broadcastEvent(eventType, ...params) {
         const w = mainWin && !mainWin.isDestroyed() ? mainWin : null;
         w?.webContents.send("ddsc-broadcast", eventType, ...params);
     } catch { }
+    try {
+        if (overlayWin && !overlayWin.isDestroyed()) {
+            overlayWin.webContents.send("ddsc-broadcast", eventType, ...params);
+            if (eventType === "UPDATE_MONITOR_DATA" && params[0]) {
+                const opMode = backend.pssdkStore?.get("OPERATING_MODE") ?? 1;
+                overlayWin.webContents.send("overlay-metrics", { ...params[0], OPERATING_MODE: opMode });
+            }
+        }
+    } catch { }
+}
+
+const OVERLAY_HTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  body {
+    background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #e0f7fa;
+    overflow: hidden;
+    height: 160px;
+    width: 280px;
+    padding: 5px;
+  }
+  .hud-card {
+    background: linear-gradient(135deg, rgba(8, 20, 32, 0.95), rgba(4, 10, 18, 0.97));
+    border: 1px solid rgba(0, 210, 255, 0.45);
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.75), 0 0 10px rgba(0, 210, 255, 0.18);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .hud-header {
+    -webkit-app-region: drag;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 8px;
+    background: rgba(0, 46, 64, 0.75);
+    border-bottom: 1px solid rgba(0, 210, 255, 0.25);
+    cursor: move;
+  }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .logo-text {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: #00d2ff;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .logo-icon {
+    width: 13px;
+    height: 13px;
+    fill: #00d2ff;
+  }
+  .mode-badge {
+    font-size: 8.5px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: rgba(0, 210, 255, 0.2);
+    color: #00d2ff;
+    border: 1px solid rgba(0, 210, 255, 0.4);
+  }
+  .close-btn {
+    -webkit-app-region: no-drag;
+    background: transparent;
+    border: none;
+    color: #88a0b0;
+    font-size: 13px;
+    font-weight: bold;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+    transition: color 0.15s;
+  }
+  .close-btn:hover {
+    color: #ff3366;
+  }
+  .hud-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+    padding: 5px 7px;
+    flex: 1;
+  }
+  .section {
+    background: rgba(0, 24, 38, 0.5);
+    border: 1px solid rgba(0, 210, 255, 0.14);
+    border-radius: 5px;
+    padding: 4px 6px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .sec-title {
+    font-size: 10px;
+    font-weight: 800;
+    color: #00d2ff;
+    letter-spacing: 0.5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(0, 210, 255, 0.12);
+    padding-bottom: 2px;
+    margin-bottom: 2px;
+  }
+  .metric-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 9.5px;
+    line-height: 1.35;
+  }
+  .metric-label {
+    color: #78909c;
+    font-size: 9px;
+  }
+  .metric-val {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .gpu-note {
+    font-size: 8px;
+    color: #546e7a;
+    text-align: right;
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+  }
+</style>
+</head>
+<body>
+<div class="hud-card">
+  <div class="hud-header">
+    <div class="header-left">
+      <div class="logo-text">
+        <svg class="logo-icon" viewBox="0 0 24 24"><path d="M12 2L4 9v6l8 7 8-7V9l-8-7zm0 3.5l5 4.3v4.4L12 18.5l-5-4.3V9.8l5-4.3z"/></svg>
+        PREDATOR
+      </div>
+      <span class="mode-badge" id="mode-badge">BALANCED</span>
+    </div>
+    <button class="close-btn" id="close-btn" title="Close">x</button>
+  </div>
+  <div class="hud-body">
+    <div class="section">
+      <div class="sec-title">
+        <span>CPU</span>
+        <span id="cpu-fan" style="color: #80deea; font-size: 8.5px; font-weight: normal;">0 RPM</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Temp</span>
+        <span class="metric-val" id="cpu-temp" style="color: #80deea;">--°C</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Usage</span>
+        <span class="metric-val" id="cpu-usage" style="color: #80d8ff;">--%</span>
+      </div>
+    </div>
+    <div class="section">
+      <div class="sec-title">
+        <span>GPU</span>
+        <span id="gpu-fan" style="color: #80deea; font-size: 8.5px; font-weight: normal;">0 RPM</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Temp</span>
+        <span class="metric-val" id="gpu-temp" style="color: #80deea;">--°C</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Usage</span>
+        <span class="metric-val" id="gpu-usage" style="color: #80d8ff;">--%</span>
+      </div>
+      <div class="gpu-note" id="gpu-note">210MHz (Dormant)</div>
+    </div>
+  </div>
+</div>
+<script>
+  const { ipcRenderer } = require("electron");
+  document.getElementById("close-btn").addEventListener("click", () => {
+    ipcRenderer.send("overlay-close");
+  });
+
+  const MODES = {
+    0: { name: "Quiet", color: "#00b0ff", bg: "rgba(0, 176, 255, 0.2)", border: "rgba(0, 176, 255, 0.4)" },
+    1: { name: "Balanced", color: "#00e5ff", bg: "rgba(0, 229, 255, 0.2)", border: "rgba(0, 229, 255, 0.4)" },
+    2: { name: "Eco", color: "#00e676", bg: "rgba(0, 230, 118, 0.2)", border: "rgba(0, 230, 118, 0.4)" },
+    4: { name: "Performance", color: "#ff9100", bg: "rgba(255, 145, 0, 0.2)", border: "rgba(255, 145, 0, 0.4)" },
+    5: { name: "Turbo", color: "#ff1744", bg: "rgba(255, 23, 68, 0.2)", border: "rgba(255, 23, 68, 0.4)" },
+    6: { name: "Eco", color: "#00e676", bg: "rgba(0, 230, 118, 0.2)", border: "rgba(0, 230, 118, 0.4)" },
+  };
+
+  function tempColor(t) {
+    if (t >= 80) return "#ff5252";
+    if (t >= 65) return "#ffb74d";
+    return "#80deea";
+  }
+
+  function updateMetrics(d) {
+    if (!d) return;
+    if (d.CPU_TEMPERATURE != null) {
+      const el = document.getElementById("cpu-temp");
+      el.textContent = d.CPU_TEMPERATURE + "°C";
+      el.style.color = tempColor(d.CPU_TEMPERATURE);
+    }
+    if (d.CPU_USAGE != null) {
+      document.getElementById("cpu-usage").textContent = Math.round(d.CPU_USAGE) + "%";
+    }
+    if (d.CPU_FANSPEED != null) {
+      document.getElementById("cpu-fan").textContent = d.CPU_FANSPEED + " RPM";
+    }
+    if (d.GPU1_TEMPERATURE != null) {
+      const el = document.getElementById("gpu-temp");
+      el.textContent = d.GPU1_TEMPERATURE + "°C";
+      el.style.color = tempColor(d.GPU1_TEMPERATURE);
+    }
+    if (d.GPU1_USAGE != null) {
+      document.getElementById("gpu-usage").textContent = Math.round(d.GPU1_USAGE) + "%";
+    }
+    if (d.GPU1_FANSPEED != null) {
+      document.getElementById("gpu-fan").textContent = d.GPU1_FANSPEED + " RPM";
+    }
+
+    const noteEl = document.getElementById("gpu-note");
+    const isIdle = d.GPU1_IDLE_STATUS === 1 || (d.GPU1_USAGE != null && d.GPU1_USAGE <= 2 && (!d.GPU1_FREQUENCY || d.GPU1_FREQUENCY <= 300));
+    if (isIdle) {
+      const f = d.GPU1_FREQUENCY ? d.GPU1_FREQUENCY + "MHz" : "210MHz";
+      noteEl.textContent = f + " (Dormant)";
+      noteEl.style.color = "#546e7a";
+    } else {
+      const f = d.GPU1_FREQUENCY ? d.GPU1_FREQUENCY + "MHz" : "Active";
+      noteEl.textContent = f;
+      noteEl.style.color = "#00e5ff";
+    }
+
+    if (d.OPERATING_MODE != null) {
+      const m = MODES[d.OPERATING_MODE] || { name: "Mode " + d.OPERATING_MODE, color: "#00e5ff", bg: "rgba(0, 229, 255, 0.2)", border: "rgba(0, 229, 255, 0.4)" };
+      const badge = document.getElementById("mode-badge");
+      badge.textContent = m.name;
+      badge.style.color = m.color;
+      badge.style.background = m.bg;
+      badge.style.borderColor = m.border;
+    }
+  }
+
+  ipcRenderer.invoke("get-overlay-init-data").then(updateMetrics).catch(() => {});
+  setInterval(() => {
+    ipcRenderer.invoke("get-overlay-init-data").then(updateMetrics).catch(() => {});
+  }, 1000);
+
+  ipcRenderer.on("overlay-metrics", (ev, data) => updateMetrics(data));
+  ipcRenderer.on("ddsc-broadcast", (ev, type, ...params) => {
+    if (type === "UPDATE_MONITOR_DATA" && params[0]) {
+      updateMetrics(params[0]);
+    } else if (type === "OPERATING_MODE" && params[0] != null) {
+      updateMetrics({ OPERATING_MODE: params[0] });
+    }
+  });
+</script>
+</body>
+</html>`;
+
+function createOverlayWindow() {
+    if (overlayWin && !overlayWin.isDestroyed()) return overlayWin;
+    overlayWin = new BrowserWindow({
+        width: 280,
+        height: 160,
+        frame: false,
+        transparent: true,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        resizable: false,
+        show: false,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false,
+        }
+    });
+
+    try {
+        const display = screen.getPrimaryDisplay();
+        const { width } = display.workAreaSize;
+        overlayWin.setPosition(Math.max(20, width - 300), 60);
+    } catch {}
+
+    overlayWin.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(OVERLAY_HTML));
+
+    overlayWin.on("close", (event) => {
+        if (!app.isQuitting) {
+            event.preventDefault();
+            overlayWin.hide();
+            _updateTrayMenu?.();
+            return false;
+        }
+    });
+
+    overlayWin.on("closed", () => {
+        overlayWin = null;
+        _updateTrayMenu?.();
+    });
+
+    return overlayWin;
+}
+
+function toggleOverlay(show) {
+    if (!overlayWin || overlayWin.isDestroyed()) {
+        createOverlayWindow();
+    }
+    const targetState = show !== undefined ? Boolean(show) : !overlayWin.isVisible();
+    if (targetState) {
+        overlayWin.show();
+        try {
+            const opMode = backend.pssdkStore?.get("OPERATING_MODE") ?? 1;
+            const lastData = backend.getLastMonitorData ? backend.getLastMonitorData() : null;
+            overlayWin.webContents.send("overlay-metrics", { ...(lastData || {}), OPERATING_MODE: opMode });
+        } catch {}
+    } else {
+        overlayWin.hide();
+    }
+    _updateTrayMenu?.();
 }
 
 function createWindow() {
@@ -841,6 +1177,16 @@ function createTray() {
                 },
                 { type: "separator" },
                 {
+                    label: "Toggle Desktop Mini Widget",
+                    type: "checkbox",
+                    checked: Boolean(overlayWin && !overlayWin.isDestroyed() && overlayWin.isVisible()),
+                    click: () => {
+                        toggleOverlay();
+                        updateTrayMenu();
+                    }
+                },
+                { type: "separator" },
+                {
                     label: "Show PredatorSense",
                     click: () => {
                         if (mainWin && !mainWin.isDestroyed()) {
@@ -871,6 +1217,7 @@ function createTray() {
             }
         });
 
+        _updateTrayMenu = updateTrayMenu;
         updateTrayMenu();
     } catch (e) {
         console.error("[tray] creation error:", e.message);
@@ -906,6 +1253,15 @@ app.whenReady().then(() => {
     try {
         protocol.handle("pss", handlePssRequest);
     } catch (e) { console.error("[pss] handler failed", e.message); }
+    ipcMain.on("overlay-close", () => toggleOverlay(false));
+    ipcMain.on("toggle-overlay", (ev, val) => toggleOverlay(val));
+    ipcMain.handle("get-overlay-init-data", () => {
+        const opMode = backend.pssdkStore?.get("OPERATING_MODE") ?? 1;
+        const last = backend.getLastMonitorData ? backend.getLastMonitorData() : null;
+        return { ...(last || {}), OPERATING_MODE: opMode };
+    });
+    backend.setOverlayToggler(toggleOverlay);
+    createOverlayWindow();
     createTray();
     createWindow();
     app.on("activate", () => {
