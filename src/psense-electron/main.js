@@ -894,7 +894,13 @@ app.whenReady().then(() => {
     const responder = startResponder(broker);
     const agents = startAgentWebservers();
     app.on("quit", () => {
-        try { responder.end(true); broker.httpSrv.close(); broker.httpsSrv.close(); agents?.forEach(s => s.close()); } catch { }
+        try {
+            backend.shutdown?.();
+            responder.end(true);
+            broker.httpSrv.close();
+            broker.httpsSrv.close();
+            agents?.forEach(s => s.close());
+        } catch { }
     });
 
     try {

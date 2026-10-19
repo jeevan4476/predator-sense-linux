@@ -17,6 +17,7 @@ const os = require("os");
 const path = require("path");
 const nnode = require("net");
 const { app, screen, Notification } = require("electron");
+const { lightingEngine } = require("./lighting-engine");
 
 // ------------------------------------------------------------------ state
 let mainWin = null;
@@ -1248,6 +1249,7 @@ async function applyLightingEntry(src) {
 
     log(`lighting write: effect=${eff} mode=${mode} speed=${speed} bri=${bri} dir=${dirNum} rgb=${rgb.join(",")}`);
     if (mode === 0) {
+        lightingEngine.stopEffect();
         // STATIC palette lives in the id-6 zone store (16-B RGB is not applied).
         // LEDs present → per-zone colors; else single picked color fills 4 zones.
         let zones = Array.isArray(src.LEDs) ? src.LEDs.slice(0, 4) : [];
@@ -1281,6 +1283,17 @@ async function applyLightingEntry(src) {
         // Animated mode active: clear zone palette cache so returning to STATIC
         // always restores per-zone hardware colors.
         kbZonePalette.clear();
+        // 4-zone hardware drops backlight with hardware method 20 animations.
+        // Hand off animation to userspace Pulsar Dynamic Lighting Engine!
+        lightingEngine.startEffect({
+            effect: eff,
+            speed,
+            brightness: bri,
+            direction: dirNum,
+            color: rgb,
+            music_effect: src.music_effect ?? src.musicEffect
+        }, daemonCall);
+        return;
     }
     // kb-frame cache (§13.28): re-sending the identical global frame (same
     // mode/speed/brightness/dir AND picked color — e.g. repeated fallback or no-op)
@@ -1571,4 +1584,12 @@ async function dispatch(module, fn, args) {
     return await h(args);
 }
 
-module.exports = { dispatch, setWindow, setBroadcaster, startPump, pssdkStore };
+function shutdown() {
+    try { lightingEngine.stopEffect(); } catch { }
+}
+
+process.on("exit", shutdown);
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+module.exports = { dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown, lightingEngine };
