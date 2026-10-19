@@ -48,9 +48,9 @@ function seedStore() {
         },
         SOUND_MODE: 10,                          // d0.AUTOMATIC
         BACKLIGHT_30S: 0,
-        BOOT_SOUND: 0,
-        STICKY_KEY: 0,
-        WIN_KEY: 0,
+        BOOT_SOUND: loadKV()["BootAnimationSound"] === false ? 0 : 1,
+        STICKY_KEY: loadKV()["StickyKeySwitch"] ? 1 : 0,
+        WIN_KEY: loadKV()["WinKeySwitch"] ? 1 : 0,
         LCD_OVERDRIVE: 0,
         GPU_MODE: 0,
         CUSTOM_BOOT_LOGO: {},
@@ -267,6 +267,10 @@ const OEM_SETTINGS = () => ({
     ModeSwitchKey: true,
     ModeSwitchKeyUI: true,
     windowsMenuKey: true,
+    PowerOffUSBCharger: true,
+    BootAnimation: true,
+    BootAnimationSound: true,
+    boot_animation_sound: true,
     Lighting: {
         keyboard: true, keyboard_device: "",
         eclogo: false, lightbar: false, logo: false,
@@ -433,6 +437,67 @@ const HANDLERS = {
         setEnable3d: ([v]) => { kvSet("Enable3d", !!v); return null; },
         execSync: ([cmd]) => { log("info.execSync suppressed:", cmd); return null; },
         openHyperLink: ([url]) => { log("openHyperLink", url); return null; },
+        // Power-Off USB charging & battery cutoff threshold
+        getUSBChargeSwitch: async () => {
+            const r = await daemonCall("usbcharge.get", {});
+            return r?.enabled ?? false;
+        },
+        setUSBChargeSwitch: async (a) => {
+            const enabled = Array.isArray(a) ? a[0] : a;
+            await daemonCall("usbcharge.set", { enabled: Boolean(enabled) });
+            kvSet("USBChargeSwitch", Boolean(enabled));
+            return null;
+        },
+        getUSBChargeBatteryThreshold: async () => {
+            const r = await daemonCall("usbcharge.get", {});
+            return r?.threshold ?? 30;
+        },
+        setUSBChargeBatteryThreshold: async (a) => {
+            const thr = Array.isArray(a) ? a[0] : a;
+            const val = Number(String(thr).replace("%", ""));
+            await daemonCall("usbcharge.set", { threshold: val });
+            kvSet("USBChargeThreshold", val);
+            return null;
+        },
+        // Boot animation and sound toggles
+        getBootAnimation: () => loadKV()["BootAnimation"] ?? true,
+        setBootAnimation: (a) => {
+            const en = Array.isArray(a) ? a[0] : a;
+            kvSet("BootAnimation", Boolean(en));
+            return null;
+        },
+        getBootAnimationSound: () => loadKV()["BootAnimationSound"] ?? true,
+        setBootAnimationSound: (a) => {
+            const en = Array.isArray(a) ? a[0] : a;
+            kvSet("BootAnimationSound", Boolean(en));
+            return null;
+        },
+        // Windows/Super key lock and Sticky keys
+        getWinKeySwitch: () => loadKV()["WinKeySwitch"] ?? false,
+        setWinKeySwitch: (a) => {
+            const en = Array.isArray(a) ? a[0] : a;
+            const val = Boolean(en);
+            kvSet("WinKeySwitch", val);
+            pssdkStore.set("WIN_KEY", val ? 1 : 0);
+            emit("WIN_KEY", val ? 1 : 0);
+            return null;
+        },
+        getStickyKeySwitch: () => loadKV()["StickyKeySwitch"] ?? false,
+        setStickyKeySwitch: (a) => {
+            const en = Array.isArray(a) ? a[0] : a;
+            const val = Boolean(en);
+            kvSet("StickyKeySwitch", val);
+            pssdkStore.set("STICKY_KEY", val ? 1 : 0);
+            emit("STICKY_KEY", val ? 1 : 0);
+            return null;
+        },
+        // Window Transparency effect
+        getTransparencyEffect: () => loadKV()["TransparencyEffect"] ?? true,
+        setTransparencyEffect: (a) => {
+            const en = Array.isArray(a) ? a[0] : a;
+            kvSet("TransparencyEffect", Boolean(en));
+            return null;
+        },
     },
     util: {
         minimizeMainWindow: () => { getWin()?.minimize(); return null; },
@@ -545,6 +610,14 @@ const HANDLERS = {
                 pssdkStore.set(k, data);
                 kvSet("LCDOverdrive", Number(data));
                 log(`LCD_OVERDRIVE set to ${data}`);
+            } else if (k === "WIN_KEY") {
+                pssdkStore.set(k, data);
+                kvSet("WinKeySwitch", Boolean(data));
+                log(`WIN_KEY set to ${data}`);
+            } else if (k === "STICKY_KEY") {
+                pssdkStore.set(k, data);
+                kvSet("StickyKeySwitch", Boolean(data));
+                log(`STICKY_KEY set to ${data}`);
             } else pssdkStore.set(k, data);  // re-derives from the profile (§13.20)
             emit(k, data);
             await applyPssdkWrite(k, data);
@@ -1592,4 +1665,4 @@ process.on("exit", shutdown);
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-module.exports = { dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown, lightingEngine };
+module.exports = { dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown, lightingEngine, HANDLERS };
