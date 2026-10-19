@@ -12,7 +12,10 @@ import argparse
 import glob
 import json
 import os
+import platform
+import shutil
 import socket
+import subprocess
 import sys
 
 RESET = "auto"
@@ -239,7 +242,7 @@ def cmd_fan(args):
 
 
 # ---------------------------------------------------------------- curve
-def daemon_req(op, sock="/run/psense.sock", timeout=5):
+def daemon_req(op, sock="/run/psense.sock", timeout=5, silent=False):
     """One-shot JSON request to psensed."""
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -255,9 +258,11 @@ def daemon_req(op, sock="/run/psense.sock", timeout=5):
         s.close()
         return json.loads(data.decode())
     except FileNotFoundError:
-        print(f"daemon not running (socket {sock} missing). start: sudo src/psensed", file=sys.stderr)
+        if not silent:
+            print(f"daemon not running (socket {sock} missing). start: sudo src/psensed", file=sys.stderr)
     except (ConnectionRefusedError, socket.timeout, OSError) as e:
-        print(f"daemon request failed: {e}", file=sys.stderr)
+        if not silent:
+            print(f"daemon request failed: {e}", file=sys.stderr)
     return None
 
 
@@ -421,12 +426,302 @@ def cmd_switchkey(args):
         print(f"mode switch key -> {'cycle' if mode == 0 else 'turbo'}")
 
 
+# ---------------------------------------------------------------- checkup
+def cmd_checkup(args):
+    # System
+    product = read("/sys/class/dmi/id/product_name") or read("/sys/class/dmi/id/board_name") or "Acer Predator Laptop"
+    bios = read("/sys/class/dmi/id/bios_version") or "Unknown"
+    kernel_release = read("/proc/sys/kernel/osrelease") or platform.release()
+    kernel = f"Linux {kernel_release}"
+    os_name = "Linux"
+    try:
+        for ln in open("/etc/os-release"):
+            if ln.startswith("PRETTY_NAME="):
+                os_name = ln.split("=", 1)[1].strip().strip('"')
+                break
+    except OSError:
+        pass
+
+    # Battery
+    bat = {}
+    for p in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+        full, design = 0, 0
+        for k_full, k_des in [("charge_full", "charge_full_design"), ("energy_full", "energy_full_design")]:
+            try:
+                cf = int(read(f"{p}/{k_full}") or 0)
+                cd = int(read(f"{p}/{k_des}") or 0)
+                if cd > 0:
+                    full, design = cf, cd
+                    break
+            except (ValueError, TypeError):
+                continue
+        cycle_count = 0
+        try:
+            cycle_count = int(read(f"{p}/cycle_count") or 0)
+        except (ValueError, TypeError):
+            pass
+        capacity = 0
+        try:
+            capacity = int(read(f"{p}/capacity") or 0)
+        except (ValueError, TypeError):
+            pass
+        status = read(f"{p}/status") or "Unknown"
+
+        if design > 100000:
+            full_mah = round(full / 1000)
+            design_mah = round(design / 1000)
+        else:
+            full_mah = full
+            design_mah = design
+
+        health_pct = min(100, round(full_mah * 100 / design_mah)) if design_mah > 0 else 100
+        wear_level = max(0, 100 - health_pct)
+
+        bat = {
+            "capacity": capacity,
+            "design_capacity": design_mah,
+            "full_capacity": full_mah,
+            "cycle_count": cycle_count,
+            "wear_level_pct": wear_level,
+            "health_pct": health_pct,
+            "status": status,
+        }
+        break
+
+    # If battery sysfs gave no design/full, fallback to daemon health if available
+    sock = getattr(args, "sock", "/run/psense.sock")
+    daemon_health = daemon_req({"op": "health"}, sock=sock, silent=True) or {}
+    if not bat or not bat.get("design_capacity"):
+        dh_bat = daemon_health.get("battery", {})
+        if dh_bat:
+            full_raw = dh_bat.get("battery_full_raw", 0)
+            des_raw = dh_bat.get("battery_design_raw", 0)
+            full_mah = round(full_raw / 1000000) if full_raw > 100000 else full_raw
+            des_mah = round(des_raw / 1000000) if des_raw > 100000 else des_raw
+            health_pct = min(100, round(full_mah * 100 / des_mah)) if des_mah > 0 else 100
+            wear_level = max(0, 100 - health_pct)
+            bat = {
+                "capacity": bat.get("capacity", 0),
+                "design_capacity": des_mah,
+                "full_capacity": full_mah,
+                "cycle_count": dh_bat.get("battery_cycle_count", 0),
+                "wear_level_pct": wear_level,
+                "health_pct": health_pct,
+                "status": dh_bat.get("battery_status", "Unknown"),
+            }
+
+    # Storage / NVMe
+    h_disks = {d.get("dev"): d for d in daemon_health.get("disks", []) if d.get("dev")}
+    storage_drives = []
+    for b in sorted(glob.glob("/sys/class/block/*")):
+        dev = os.path.basename(b)
+        if dev.startswith(("loop", "zram", "ram", "dm-")):
+            continue
+        if dev.startswith("nvme") and not dev.endswith("n1"):
+            continue
+        if dev.startswith("sd") and dev[-1].isdigit():
+            continue
+        model = (read(f"{b}/device/model") or read(f"{b}/device/name") or "").strip()
+        if not model:
+            continue
+        dev_path = f"/dev/{dev}"
+
+        temp_c = None
+        crit_warning = 0
+        hw = glob.glob(f"{b}/device/hwmon*/temp1_input")
+        if not hw and dev.startswith("nvme"):
+            for h in glob.glob("/sys/class/hwmon/hwmon*"):
+                if read(f"{h}/name") == "nvme":
+                    hw.append(f"{h}/temp1_input")
+        for tc in hw:
+            raw = read(tc)
+            if raw:
+                try:
+                    t = int(raw)
+                    temp_c = round(t / 1000) if t > 1000 else t
+                    alarm_f = tc.replace("temp1_input", "temp1_alarm")
+                    if os.path.exists(alarm_f):
+                        crit_warning = int(read(alarm_f) or 0)
+                    break
+                except ValueError:
+                    pass
+
+        smart_verdict = "PASSED (Good)"
+        if dev_path in h_disks:
+            hd = h_disks[dev_path]
+            st = hd.get("smart_status", "")
+            if "passed" in st.lower():
+                smart_verdict = "PASSED (Good)"
+            elif st:
+                smart_verdict = f"{st} (Warning)"
+            elif hd.get("health") == 0:
+                smart_verdict = "PASSED (Good)"
+        else:
+            try:
+                r = subprocess.run(["smartctl", "-H", dev_path],
+                                   capture_output=True, text=True, timeout=3)
+                txt = (r.stdout or "") + (r.stderr or "")
+                for ln in txt.splitlines():
+                    if "result:" in ln.lower():
+                        st = ln.split(":", 1)[1].strip()
+                        if "passed" in st.lower():
+                            smart_verdict = "PASSED (Good)"
+                        else:
+                            smart_verdict = f"{st} (Warning)"
+                        break
+            except Exception:
+                pass
+
+        storage_drives.append({
+            "drive": f"{model} ({dev_path})",
+            "device": dev_path,
+            "model": model,
+            "smart_health": smart_verdict,
+            "temperature_c": temp_c,
+            "critical_warnings": crit_warning,
+        })
+
+    # Memory
+    mem_total_kb, mem_avail_kb = 0, 0
+    try:
+        for ln in open("/proc/meminfo"):
+            if ln.startswith("MemTotal:"):
+                mem_total_kb = int(ln.split()[1])
+            elif ln.startswith("MemAvailable:"):
+                mem_avail_kb = int(ln.split()[1])
+    except OSError:
+        pass
+
+    mem_used_kb = max(0, mem_total_kb - mem_avail_kb)
+    mem_usage_pct = round(mem_used_kb * 100 / mem_total_kb) if mem_total_kb > 0 else 0
+
+    mem_hw = daemon_req({"op": "memory"}, sock=sock, silent=True) or {}
+    ram_type = mem_hw.get("type") or "DDR5"
+    ram_freq = mem_hw.get("frequency") or 4800
+    total_mb = mem_hw.get("total_mb")
+    if total_mb and total_mb > 0:
+        total_gb = round(total_mb / 1024)
+    else:
+        total_gb = round(mem_total_kb / 1048576)
+
+    used_gb = round(mem_used_kb / 1048576, 1)
+    avail_gb = round(mem_avail_kb / 1048576, 1)
+
+    payload = {
+        "system": {
+            "product_name": product,
+            "bios_version": bios,
+            "kernel": kernel,
+            "os": os_name,
+        },
+        "battery": bat,
+        "storage": storage_drives,
+        "ram": {
+            "total_gb": total_gb,
+            "available_gb": avail_gb,
+            "used_gb": used_gb,
+            "usage_pct": mem_usage_pct,
+            "total_kb": mem_total_kb,
+            "available_kb": mem_avail_kb,
+            "used_kb": mem_used_kb,
+            "type": ram_type,
+            "frequency_mhz": ram_freq,
+        },
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+        return
+
+    # Clean formatted terminal output
+    print("================ Predator Sense Hardware Checkup ================")
+    print(f"System:  {product} (BIOS {bios})")
+    print(f"Kernel:  {kernel}")
+    print()
+    print("[Battery]")
+    if bat:
+        print(f"  Health:       {bat['health_pct']}% (Design: {bat.get('design_capacity', 0)} mAh, Full: {bat.get('full_capacity', 0)} mAh)")
+        print(f"  Wear Level:   {bat['wear_level_pct']}%")
+        print(f"  Cycle Count:  {bat.get('cycle_count', 0)}")
+        print(f"  Status:       {bat.get('status', 'Unknown')} ({bat.get('capacity', 0)}%)")
+    else:
+        print("  Status:       Not Available")
+    print()
+    print("[Storage]")
+    if storage_drives:
+        for d in storage_drives:
+            print(f"  Drive:        {d['model']} ({d['device']})")
+            print(f"  SMART Health: {d['smart_health']}")
+            temp_str = f"{d['temperature_c']}°C" if d['temperature_c'] is not None else "N/A"
+            print(f"  Temperature:  {temp_str}")
+            if d.get("critical_warnings", 0) > 0:
+                print(f"  Critical:     {d['critical_warnings']}")
+    else:
+        print("  Drive:        None detected")
+    print()
+    print("[Memory]")
+    print(f"  RAM Total:    {total_gb} GB (Used: {used_gb} GB / {mem_usage_pct}%)")
+    if ram_type and ram_freq:
+        print(f"  Type:         {ram_type} @ {ram_freq} MHz")
+    elif ram_type:
+        print(f"  Type:         {ram_type}")
+    print("=================================================================")
+
+
+# ---------------------------------------------------------------- ui launcher
+def cmd_ui(_):
+    candidates = [
+        "/usr/bin/predator-sense",
+        "/opt/predator-sense/app/predator-sense",
+        "/opt/predator-sense/predator-sense",
+    ]
+    which_ps = shutil.which("predator-sense")
+    if which_ps and which_ps not in candidates:
+        candidates.append(which_ps)
+
+    exe = None
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            exe = c
+            break
+
+    if not exe:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        local_app = os.path.join(repo_root, "src/psense-electron")
+        el = shutil.which("electron")
+        if os.path.isdir(local_app) and el:
+            cmd = [el, local_app]
+        else:
+            sys.exit("error: Predator Sense UI executable not found (/usr/bin/predator-sense)")
+    else:
+        cmd = [exe]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        print(f"Predator Sense UI launched in background (PID {proc.pid})")
+    except OSError as e:
+        sys.exit(f"error launching UI: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="psense", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("sensors", help="fan rpm + temperatures (JSON)")
     sub.add_parser("info", help="platform/tooling state (JSON)")
+
+    p = sub.add_parser("checkup", help="hardware diagnostics and health checkup")
+    p.add_argument("--json", action="store_true", help="output as JSON")
+    p.add_argument("--sock", default="/run/psense.sock")
+
+    sub.add_parser("ui", help="launch Predator Sense GUI detached in background")
 
     p = sub.add_parser("profile", help="thermal profile get|list|set")
     p.add_argument("action", nargs="?", choices=["get", "list", "set"], default="get")
@@ -489,7 +784,8 @@ def main():
     args = ap.parse_args()
     {"sensors": cmd_sensors, "info": cmd_info, "profile": cmd_profile, "fan": cmd_fan,
      "curve": cmd_curve, "kb": cmd_kb, "wmi": cmd_wmi, "battmode": cmd_battmode,
-     "usbcharge": cmd_usbcharge, "switchkey": cmd_switchkey}[args.cmd](args)
+     "usbcharge": cmd_usbcharge, "switchkey": cmd_switchkey,
+     "checkup": cmd_checkup, "ui": cmd_ui}[args.cmd](args)
 
 
 if __name__ == "__main__":

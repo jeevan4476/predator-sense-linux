@@ -15,6 +15,14 @@ which is owned root:wheel 0660 \- wheel users run this CLI without sudo.
 All privileged EC/WMI work happens in the daemon, never in the CLI.
 .SH SUBCOMMANDS
 .TP
+.BI checkup " [\-\-json]"
+Hardware diagnostic checkup: reports system DMI info, battery health, wear
+level, cycle count, NVMe storage SMART status, temperature, and memory usage.
+Outputs a clean formatted terminal report by default or machine-readable JSON with \-\-json.
+.TP
+.B ui
+Launch the Predator Sense graphical user interface detached in the background.
+.TP
 .B sensors
 Fan RPM and temperatures as JSON (hwmon-sourced, 2 s cache).
 .TP
