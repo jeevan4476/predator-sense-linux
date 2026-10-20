@@ -270,15 +270,19 @@ def cmd_curve(args):
     fan = args.fan or "cpu"
     if args.action == "show":
         r = daemon_req({"op": "fan.curve.get"}, args.sock)
-        print(json.dumps(r, indent=2) if r is not None else None)
     elif args.action == "set":
         if not args.points or len(args.points.split()) < 2:
             sys.exit('points format: "<temp°>:<pct> …" e.g. "40:25 60:45 80:70 90:100"')
         r = daemon_req({"op": "fan.curve.set", "fan": fan, "points": args.points}, args.sock)
-        print(json.dumps(r, indent=2) if r is not None else None)
     elif args.action == "clear":
         r = daemon_req({"op": "fan.curve.clear", "fan": fan}, args.sock)
-        print(json.dumps(r, indent=2) if r is not None else None)
+    # consistent transport failure like every other subcommand (erratum E4:
+    # curve used to print "None" and exit 0 when the daemon was down)
+    if r is None:
+        sys.exit(2)
+    print(json.dumps(r, indent=2))
+    if r.get("error"):
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------- info
@@ -513,6 +517,12 @@ def cmd_battmode(args):
     print(json.dumps(r, indent=2))
     if r.get("error"):
         sys.exit(1)
+    # committed:false means the EC did not take the mode (e.g. adaptive
+    # rejection); top-level status is forced 0 by the daemon, so surface the
+    # failure to scripts (daemon-protocol spec §7.2, erratum E4)
+    if r.get("committed") is False:
+        print("warning: EC did not commit the new mode", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_usbcharge(args):
@@ -551,6 +561,8 @@ def cmd_switchkey(args):
     sock = getattr(args, "sock", "/run/psense.sock")
     if args.action == "get":
         res = daemon_req({"op": "switchkey.get"}, sock=sock)
+        if res is None:
+            sys.exit(2)
         if "error" in res:
             sys.exit(f"error: {res['error']}")
         mode = res.get("mode", 0)
