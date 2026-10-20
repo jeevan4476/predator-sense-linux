@@ -1,5 +1,8 @@
 /**
  * Userspace Pulsar Dynamic Lighting Engine for 4-Zone Keyboards
+ * (.ts twin — migrated in P1b from lighting-engine.js, contract pinned
+ *  by tests/test_lighting_engine.js; B-lite: tsc emits lighting-engine.js
+ *  with identical paths and semantics)
  *
  * Mathematical dynamic lighting (WAVE, BREATHING, SHIFTING, METEOR, TWINKLING, RAINBOW, NEON)
  * is delegated to the background psensed daemon for zero-overhead, GUI-independent playback.
@@ -7,9 +10,30 @@
  * streaming frames to daemonCall("kb.zone.set", ...).
  */
 
+import type { ChildProcess } from "child_process";
+
 const { spawn } = require("child_process");
 
-function hsvToRgb(h, s, v) {
+/** One RGB triple in 0..255 per channel. */
+type Rgb = [number, number, number];
+type NullableRgb = number[] | null;
+type DaemonCall = (op: string, args: Record<string, unknown>) => Promise<unknown>;
+type UpdateFn = (dt: number, now: number) => number[][];
+
+interface LightingConfig {
+    effect?: string;
+    /** parsed RGB array from the backend; malformed values fall back in clampRgb */
+    color?: unknown;
+    brightness?: number;
+    speed?: number;
+    direction?: number;
+    zoneCount?: number;
+    LEDs?: unknown[];
+    music_effect?: number;
+    musicEffect?: number;
+}
+
+function hsvToRgb(h: number, s: number, v: number): Rgb {
     h = ((h % 360) + 360) % 360;
     s = Math.max(0, Math.min(1, s));
     v = Math.max(0, Math.min(1, v));
@@ -30,7 +54,7 @@ function hsvToRgb(h, s, v) {
     ];
 }
 
-function rgbToHsv(r, g, b) {
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
     r /= 255; g /= 255; b /= 255;
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
     const d = max - min;
@@ -38,14 +62,15 @@ function rgbToHsv(r, g, b) {
     const s = max === 0 ? 0 : d / max;
     const v = max;
     if (d !== 0) {
-        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
-        else if (max === g) h = ((b - r) / d + 2) * 60;
-        else h = ((r - g) / d + 4) * 60;
+        if (max === r) h = 60 * (((g - b) / d) % 6);
+        else if (max === g) h = 60 * ((b - r) / d + 2);
+        else h = 60 * ((r - g) / d + 4);
     }
+    if (h < 0) h += 360;
     return [h, s, v];
 }
 
-function clampRgb(rgb) {
+function clampRgb(rgb: unknown): Rgb {
     if (!rgb || !Array.isArray(rgb) || rgb.length < 3) return [0, 174, 199];
     return [
         Math.max(0, Math.min(255, Math.round(Number(rgb[0]) || 0))),
@@ -54,7 +79,7 @@ function clampRgb(rgb) {
     ];
 }
 
-function scaleRgb(rgb, factor) {
+function scaleRgb(rgb: number[], factor: number): Rgb {
     factor = Math.max(0, factor);
     return [
         Math.max(0, Math.min(255, Math.round(rgb[0] * factor))),
@@ -63,12 +88,12 @@ function scaleRgb(rgb, factor) {
     ];
 }
 
-function colorsEqual(c1, c2) {
+function colorsEqual(c1: NullableRgb, c2: NullableRgb): boolean {
     if (!c1 || !c2) return false;
     return c1[0] === c2[0] && c1[1] === c2[1] && c1[2] === c2[2];
 }
 
-function lerpColor(c1, c2, t) {
+function lerpColor(c1: number[], c2: number[], t: number): Rgb {
     t = Math.max(0, Math.min(1, t));
     return [
         Math.round(c1[0] + (c2[0] - c1[0]) * t),
@@ -78,6 +103,16 @@ function lerpColor(c1, c2, t) {
 }
 
 class LightingEngine {
+    running: boolean;
+    activeSessionId: number;
+    activeProc: ChildProcess | null;
+    lastWrittenZones: NullableRgb[];
+    currentConfig: Record<string, unknown> | null;
+    screenSampleTimer: NodeJS.Timeout | null;
+    screenSampleColors: number[][] | null;
+    audioRms: number;
+    audioPeak: number;
+
     constructor() {
         this.running = false;
         this.activeSessionId = 0;
@@ -90,7 +125,7 @@ class LightingEngine {
         this.audioPeak = 0;
     }
 
-    stopEffect() {
+    stopEffect(): void {
         this.running = false;
         this.activeSessionId++;
         if (this.activeProc) {
@@ -107,7 +142,7 @@ class LightingEngine {
         this.lastWrittenZones = [];
     }
 
-    async _applyZones(zones, daemonCall, sessionId) {
+    async _applyZones(zones: number[][], daemonCall: DaemonCall, sessionId: number): Promise<void> {
         if (!this.running || sessionId !== this.activeSessionId) return;
         const target = zones.map(clampRgb);
         const count = target.length;
@@ -135,7 +170,7 @@ class LightingEngine {
         }
     }
 
-    async _runLoop(sessionId, daemonCall, updateFn) {
+    async _runLoop(sessionId: number, daemonCall: DaemonCall, updateFn: UpdateFn): Promise<void> {
         let lastTime = Date.now();
         while (this.running && sessionId === this.activeSessionId) {
             const now = Date.now();
@@ -148,7 +183,7 @@ class LightingEngine {
                     await this._applyZones(nextZones, daemonCall, sessionId);
                 }
             } catch (err) {
-                console.error("[lighting-engine] render frame error:", err.message);
+                console.error("[lighting-engine] render frame error:", (err as Error).message);
             }
 
             const elapsed = Date.now() - now;
@@ -158,7 +193,7 @@ class LightingEngine {
         }
     }
 
-    _startAudioMonitor(sessionId) {
+    _startAudioMonitor(sessionId: number): void {
         try {
             const proc = spawn("parec", [
                 "-d", "@DEFAULT_MONITOR@",
@@ -168,7 +203,8 @@ class LightingEngine {
             ], { stdio: ["ignore", "pipe", "ignore"] });
 
             this.activeProc = proc;
-            proc.stdout.on("data", (chunk) => {
+            if (!proc.stdout) return;
+            proc.stdout.on("data", (chunk: Buffer) => {
                 if (!this.running || sessionId !== this.activeSessionId) return;
                 let sumSquares = 0;
                 let n = 0;
@@ -186,7 +222,7 @@ class LightingEngine {
                 }
             });
 
-            proc.on("error", (e) => {
+            proc.on("error", (e: Error) => {
                 console.warn("[lighting-engine] parec monitor not available:", e.message);
                 this.activeProc = null;
             });
@@ -194,11 +230,11 @@ class LightingEngine {
                 if (this.activeProc === proc) this.activeProc = null;
             });
         } catch (e) {
-            console.warn("[lighting-engine] Failed to start parec:", e.message);
+            console.warn("[lighting-engine] Failed to start parec:", (e as Error).message);
         }
     }
 
-    _startScreenSampler(sessionId, zoneCount = 4) {
+    _startScreenSampler(sessionId: number, zoneCount: number = 4): void {
         const sampleOnce = () => {
             if (!this.running || sessionId !== this.activeSessionId) return;
             try {
@@ -213,13 +249,14 @@ class LightingEngine {
                     "-"
                 ], { stdio: ["ignore", "pipe", "ignore"] });
 
-                const chunks = [];
-                proc.stdout.on("data", d => chunks.push(d));
-                proc.on("close", (code) => {
+                if (!proc.stdout) return;
+                const chunks: Buffer[] = [];
+                proc.stdout.on("data", (d: Buffer) => chunks.push(d));
+                proc.on("close", (code: number | null) => {
                     if (code === 0) {
                         const buf = Buffer.concat(chunks);
                         if (buf.length >= zoneCount * 3) {
-                            const sampled = [];
+                            const sampled: number[][] = [];
                             for (let i = 0; i < zoneCount; i++) {
                                 sampled.push([buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2]]);
                             }
@@ -234,11 +271,11 @@ class LightingEngine {
         this.screenSampleTimer = setInterval(sampleOnce, 220);
     }
 
-    startEffect(config, daemonCall) {
+    startEffect(config: LightingConfig, daemonCall: DaemonCall): void {
         this.stopEffect();
         this.running = true;
         const sessionId = ++this.activeSessionId;
-        this.currentConfig = { ...config };
+        this.currentConfig = { ...config } as Record<string, unknown>;
 
         const zoneCount = Math.max(1, Math.min(4, Number(config.zoneCount || (Array.isArray(config.LEDs) && config.LEDs.length ? config.LEDs.length : 4)) || 4));
         const eff = String(config.effect || "").toUpperCase();
@@ -255,7 +292,7 @@ class LightingEngine {
                     phase += dt * freq * Math.PI;
                     const factor = 0.2 + 0.8 * (0.5 * (1 + Math.sin(phase)));
                     const c = scaleRgb(baseColor, factor * briScale);
-                    return Array(zoneCount).fill(c);
+                    return Array<number[]>(zoneCount).fill(c);
                 });
                 break;
             }
@@ -265,7 +302,7 @@ class LightingEngine {
                 const hueSpeed = 45 + speed * 25; // deg/sec
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     baseHue = (baseHue + (dir === 2 ? -1 : 1) * hueSpeed * dt + 360000) % 360;
-                    const zones = [];
+                    const zones: number[][] = [];
                     for (let i = 0; i < zoneCount; i++) {
                         const offset = (dir === 2 ? -i : i) * (zoneCount > 1 ? 60 : 0);
                         const hue = (baseHue + offset + 360000) % 360;
@@ -283,7 +320,7 @@ class LightingEngine {
                 const shiftSpeed = 25 + speed * 20; // deg/sec
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     shiftPhase = (shiftPhase + (dir === 2 ? -1 : 1) * shiftSpeed * dt + 360000) % 360;
-                    const zones = [];
+                    const zones: number[][] = [];
                     for (let i = 0; i < zoneCount; i++) {
                         const zoneOffset = (dir === 2 ? -i : i) * (zoneCount > 1 ? 35 : 0);
                         const h = (userHue + shiftPhase + zoneOffset + 360000) % 360;
@@ -306,7 +343,7 @@ class LightingEngine {
                         if (pos > zoneCount + 1.0) pos = -1.0;
                     }
 
-                    const zones = [];
+                    const zones: number[][] = [];
                     const ambient = 0.08;
                     for (let i = 0; i < zoneCount; i++) {
                         const dist = dir === 2 ? (i - pos) : (pos - i);
@@ -326,7 +363,7 @@ class LightingEngine {
 
             case "TWINKLING": {
                 const ambient = 0.18;
-                const glints = Array(zoneCount).fill(0);
+                const glints = Array<number>(zoneCount).fill(0);
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     for (let i = 0; i < zoneCount; i++) {
                         if (glints[i] > 0) {
@@ -335,7 +372,7 @@ class LightingEngine {
                             glints[i] = 1.0;
                         }
                     }
-                    const zones = [];
+                    const zones: number[][] = [];
                     for (let i = 0; i < zoneCount; i++) {
                         const intensity = ambient + (1.0 - ambient) * glints[i];
                         let c = scaleRgb(baseColor, intensity * briScale);
@@ -352,7 +389,7 @@ class LightingEngine {
 
             case "SCREEN": {
                 this._startScreenSampler(sessionId, zoneCount);
-                let currentZones = Array(zoneCount).fill(baseColor);
+                let currentZones = Array<number[]>(zoneCount).fill(baseColor);
                 let fallbackPhase = 0;
                 this._runLoop(sessionId, daemonCall, (dt) => {
                     fallbackPhase = (fallbackPhase + dt * 60) % 360;
@@ -383,7 +420,7 @@ class LightingEngine {
                     const fallbackAmp = 0.15 + 0.1 * Math.pow(Math.max(0, Math.sin(simBeat)), 4);
                     const amp = Math.max(this.audioRms, fallbackAmp);
 
-                    const zones = [];
+                    const zones: number[][] = [];
                     if (musicStyle === 1 || musicStyle === 8) {
                         for (let i = 0; i < zoneCount; i++) {
                             const h = (wavePhase + i * (zoneCount > 1 ? 60 : 0)) % 360;
@@ -394,7 +431,7 @@ class LightingEngine {
                         const dynamicHue = (180 - amp * 160 + 360) % 360;
                         const factor = Math.min(1.0, 0.25 + 0.75 * amp);
                         const c = hsvToRgb(dynamicHue, 1.0, factor * briScale);
-                        return Array(zoneCount).fill(c);
+                        return Array<number[]>(zoneCount).fill(c);
                     } else {
                         if (zoneCount === 4) {
                             const centerAmp = Math.min(1.0, 0.2 + 0.8 * amp);
@@ -424,7 +461,7 @@ class LightingEngine {
                     phase += dt * Math.PI;
                     const factor = 0.2 + 0.8 * (0.5 * (1 + Math.sin(phase)));
                     const c = scaleRgb(baseColor, factor * briScale);
-                    return Array(zoneCount).fill(c);
+                    return Array<number[]>(zoneCount).fill(c);
                 });
                 break;
             }
@@ -434,12 +471,13 @@ class LightingEngine {
 
 const lightingEngine = new LightingEngine();
 
-module.exports = {
+export = {
     LightingEngine,
     lightingEngine,
     hsvToRgb,
     rgbToHsv,
     scaleRgb,
     clampRgb,
+    lerpColor,
     colorsEqual
 };

@@ -6,7 +6,10 @@
   "channel": "LinuxShim",
   "private": true,
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "typecheck": "tsc -p . --noEmit",
+    "build": "tsc -p .",
+    "generate:ddsc": "node generate-ddsc-dts.mjs"
   },
   "dependencies": {
     "@electron/remote": "^2.1.3",
@@ -14,5 +17,9 @@
     "electron": "^44.9.0",
     "mqtt": "^4.3.7",
     "websocket-stream": "^5.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "24",
+    "typescript": "5.9.3"
   }
 }
