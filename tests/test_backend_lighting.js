@@ -66,8 +66,10 @@ async function runTests() {
             assert.strictEqual(daemonCalls[0].args.brightness, 80);
             assert.strictEqual(daemonCalls[0].args.direction, 2);
             assert.deepStrictEqual(daemonCalls[0].args.rgb, [0, 255, 204]);
-            assert.strictEqual(daemonCalls[0].args.zoneCount, 4);
+            // canonical name only (erratum E7): the daemon reads zone_count;
+            // the duplicate zoneCount key was removed
             assert.strictEqual(daemonCalls[0].args.zone_count, 4);
+            assert.strictEqual(daemonCalls[0].args.zoneCount, undefined);
             // Must NOT have written method 20 kb.set
             assert.ok(!daemonCalls.some(c => c.op === "kb.set"), `${eff} must not write method 20 kb.set`);
             console.log(`  ok ${eff} delegated to daemon kb.effect.set`);

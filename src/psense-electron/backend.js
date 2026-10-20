@@ -1738,8 +1738,7 @@ async function applyLightingEntry(src) {
                 brightness: bri,
                 direction: dirNum,
                 rgb,
-                zoneCount,
-                zone_count: zoneCount,
+                zone_count: zoneCount,   // canonical name; the daemon reads zone_count only
             });
             return;
         } else if (eff === "SCREEN" || eff === "MUSIC") {
@@ -2072,6 +2071,6 @@ process.on("SIGTERM", shutdown);
 module.exports = {
     dispatch, setWindow, setBroadcaster, startPump, pssdkStore, shutdown,
     lightingEngine, HANDLERS, setOverlayToggler, toggleOverlay, getLastMonitorData,
-    detectSystemModel, detectSystemFamily, detectSerialNumber,
+    detectSystemModel, detectSystemFamily, detectSerialNumber, daemonCall,
     applyLightingEntry, applyLightingWrite, setDaemonCallOverride,
 };
