@@ -11,11 +11,15 @@ import sys
 import unittest
 from unittest.mock import patch, MagicMock
 
-# Import src/psense dynamically
+# Import src/psense dynamically (load_module() was removed in Python 3.15)
+import importlib.util
 from importlib.machinery import SourceFileLoader
 
 PSENSE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "psense"))
-psense = SourceFileLoader("psense", PSENSE_PATH).load_module()
+loader = SourceFileLoader("psense", PSENSE_PATH)
+spec = importlib.util.spec_from_loader("psense", loader)
+psense = importlib.util.module_from_spec(spec)
+loader.exec_module(psense)
 
 
 class TestCliLighting(unittest.TestCase):
