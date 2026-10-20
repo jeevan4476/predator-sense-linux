@@ -272,9 +272,9 @@ psense curve clear                    # Revert to automatic curve
 
 # RGB Backlight & Lighting Presets
 psense kb get                         # Display current keyboard lighting state
-psense kb set static 100 --rgb 0,180,255     # Set all zones to bright cyan
-psense kb zone 1 100 --rgb 255,0,0           # Set Zone 1 (WASD) to red
-psense kb zone 2 100 --rgb 0,255,100         # Set Zone 2 to emerald green
+psense kb set static --brightness 200 --rgb 0,180,255   # All zones bright cyan (brightness is 0..255 for set)
+psense kb zone --zones 1 --rgb 255,0,0                  # Zone 1 (WASD) red (drops --rgb to 0,0,0 to turn off a zone)
+psense kb effect wave --speed 4 --color 00ffcc          # Animated software wave (brightness here is 0..100, via --brightness)
 
 # Battery Longevity & Charging Modes
 psense battmode get                   # Query current battery health charging state
