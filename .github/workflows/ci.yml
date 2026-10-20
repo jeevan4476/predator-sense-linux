@@ -37,8 +37,8 @@ jobs:
       - name: backend(node) tests
         run: node --test tests/test_backend_lighting.js
   rust:
-    # psensed-rs workspace: byte-contract tests + strict lint gate.
-    separate job so a toolchain hiccup never blocks the python/node lanes.
+    # psensed-rs workspace: byte-contract tests + strict lint gate. Separate
+    # job so a toolchain hiccup never blocks the python/node lanes.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
