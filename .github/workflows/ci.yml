@@ -19,11 +19,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: python tests (daemon, cli lighting, gpu-oc)
+      - name: python tests (daemon, cli lighting, gpu-oc, hardening, checkup)
         run: |
           python3 -m unittest tests.test_cli_lighting \
                               tests.test_lighting_engine \
-                              tests.test_gpu_oc
+                              tests.test_gpu_oc \
+                              tests.test_hardening \
+                              tests.test_checkup_json
       - name: syntax-check electron shims
         run: |
           node --check src/psense-electron/backend.js

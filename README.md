@@ -263,6 +263,7 @@ psense fan mode max                   # Set fans to 100% maximum RPM
 psense fan mode custom --fan cpu      # Enable custom control for CPU fan
 psense fan speed 65 --fan both        # Set CPU & GPU fan duty cycle to 65%
 psense fan reset                      # Restore default firmware fan controls
+psense fan reset --fan cpu            # Restore only the CPU fan (both by default)
 
 # Custom Userspace Fan Curves (Temperature °C -> Speed %)
 psense curve show                     # Display active temperature curve points
@@ -287,6 +288,29 @@ psense usbcharge set on 20            # Keep USB ports powered while off until b
 # Launch Desktop GUI Detached
 psense ui
 ```
+
+### Automation contract (`checkup --json`)
+
+For scripts and monitoring, `psense checkup --json` prints a stable JSON envelope:
+
+| Key       | Shape  | Contents                                                                                        |
+| --------- | ------ | ----------------------------------------------------------------------------------------------- |
+| `system`  | object | `product_name`, `bios_version`, `kernel`, `os`                                                   |
+| `battery` | object | `capacity`, `design_capacity`, `full_capacity`, `cycle_count`, `wear_level_pct`, `health_pct`, `status` |
+| `storage` | list   | per drive: `drive`, `device`, `model`, `smart_health`, `temperature_c`, `critical_warnings`     |
+| `ram`     | object | `total_gb`, `available_gb`, `used_gb`, `usage_pct`, kB-level fields, `type`, `frequency_mhz`    |
+
+The contract is pinned by `tests/test_checkup_json.py` on CI:
+
+- Exit code `0` even when the daemon socket is unreachable; daemon-fed
+  fields degrade to defaults instead of failing the command.
+- Top-level keys are fixed. New fields may appear inside a section, but
+  existing keys are never renamed or removed.
+
+The same transport discipline now applies to the control ops: exit `2`
+when the daemon is unreachable, `1` on a daemon-reported error (`fan curve`,
+`switchkey get` and `battmode set` have been aligned; `battmode set` also
+exits `1` with a warning when the EC reports `committed: false`).
 
 ---
 
