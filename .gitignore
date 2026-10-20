@@ -17,6 +17,7 @@ src/psensed.service
 # B-lite build outputs: emitted by tsc from the authoritative .ts twin
 src/psense-electron/lighting-engine.js
 src/psense-electron/preload.js
+src/psense-electron/daemon-protocol.js
 
 # psensed-rs: rust workspace
 # glibc builds by default (musl optional later); catch all target artifacts
