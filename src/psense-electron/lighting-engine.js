@@ -441,5 +441,6 @@ module.exports = {
     rgbToHsv,
     scaleRgb,
     clampRgb,
+    lerpColor,
     colorsEqual
 };
