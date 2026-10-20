@@ -1,0 +1,94 @@
+.\" Predator Sense Linux
+.TH PSENSE 1 "2026-10-18" "predator-sense 5.0.1463" "User Commands"
+.SH NAME
+psense \- CLI client for the Predator Sense Linux daemon
+.SH SYNOPSIS
+.B psense
+.I subcommand
+.RI [ arguments ]
+.SH DESCRIPTION
+CLI client for
+.BR psensed (8).
+All commands talk JSON over the daemon unix socket
+.IR /run/psense.sock ,
+which is owned root:wheel 0660 \- wheel users run this CLI without sudo.
+All privileged EC/WMI work happens in the daemon, never in the CLI.
+.SH SUBCOMMANDS
+.TP
+.BI checkup " [\-\-json]"
+Hardware diagnostic checkup: reports system DMI info, battery health, wear
+level, cycle count, NVMe storage SMART status, temperature, and memory usage.
+Outputs a clean formatted terminal report by default or machine-readable JSON with \-\-json.
+.TP
+.B ui
+Launch the Predator Sense graphical user interface detached in the background.
+.TP
+.B sensors
+Fan RPM and temperatures as JSON (hwmon-sourced, 2 s cache).
+.TP
+.B info
+Platform/tooling state: DMI product, kernel, hwmon and WMI device inventory.
+.TP
+.B profile get | list | set NAME
+Thermal/scenario profile (maps to the platform-profile sysfs and the
+Acer gaming-scenario WMI surface).
+.TP
+.B fan status | mode | speed | reset | sweep
+HWmon fan control (per-fan mode/pwm via acer\-wmi force_caps).
+.TP
+.BI fan " wmode ID | wspeed " FAN " PCT | wget | wmodes | wtable"
+WMI fan-table surface (raw percent/level writes, raw table read).
+.TP
+.B fan curve set --fan FAN --points "T:P ..."
+.B / fan curve show | clear
+Userspace temp\(enpercent curves with hysteresis, interpreted by the daemon.
+.TP
+.B kb get | zone I R,G,B | set LIGHTMODE BRIGHTNESS --rgb R,G,B
+.B / kb effect [EFFECT] [--speed N] [--brightness N] [--direction 1|2] [--color HEX] [--json]
+.B / kb effect stop | status
+Keyboard backlight, per-zone colors, and dynamic daemon lighting effects.
+Supported dynamic effects:
+.IR wave ,
+.IR breathing ,
+.IR shifting ,
+.IR meteor ,
+.IR twinkling .
+Dynamic effects are calculated and animated smoothly by the background engine in
+.BR psensed (8),
+persisting across reboots and working completely independently of the GUI.
+Use
+.B kb effect stop
+to halt dynamic lighting or
+.B kb effect status
+(or
+.BR "kb effect" )
+to view current animation parameters. Options include
+.BI \-\-speed " 1..9"
+(default 3),
+.BI \-\-brightness " 0..100"
+(default 100),
+.BI \-\-direction " 1|2"
+(1=right, 2=left), and
+.BI \-\-color " HEX|R,G,B"
+(default teal).
+.TP
+.B battmode get | set MODE
+Battery charge mode via the BatteryControl WMI surface (GUID begins
+79772EC5; see spec/protocol.md §5 in the source tree).  Modes: optimized,
+full, adaptive (adaptive is rejected by the EC on this machine and
+reported honestly, never faked).
+.TP
+.BI wmi " GUID_TAG MID [HEXBYTES] [\-\-out N]"
+Raw whitelisted WMI method call through the daemon (allow-masked by
+GUID and method id \- undocumented vendor surfaces are not callable).
+.SH FILES
+.TP
+.I /run/psense.sock
+daemon JSON API socket
+.SH SEE ALSO
+.BR psensed (8),
+.BR predator-sense (1)
+.SH BUGS
+Adaptive/AI\-Smart charging is hidden on machines where the EC rejects the
+adaptive function (reported honestly, not silently ignored).  Send issues
+against the predator\-sense\-linux project.

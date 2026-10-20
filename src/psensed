@@ -1,0 +1,1550 @@
+#!/usr/bin/env python3
+"""psensed — Predator Sense Linux daemon (PHN16-71 family).
+
+Root daemon over the stock-kernel surfaces (platform-profile + acer hwmon).
+Exposes a newline-JSON API on a unix socket; clients (CLI/GUI) connect without
+their own root privileges — the socket is owner root, group wheel.
+
+Spec: ../spec/protocol.md   Ledger: ../analysis/wmi-methods.md
+
+Ops (request = one JSON object + '\n', reply = one JSON object):
+  sensors                              cached rpm/temps (2 s TTL)
+  info                                 platform/tooling state
+  profile.get / profile.set {name}
+  fan.get                              rpm + per-fan pwm/enable/mode
+  fan.mode    {mode, fan?}             auto|turbo|custom
+  fan.speed   {pct, fan?}              fixed custom % (long-term)
+  fan.reset                            firmware auto for all fans
+  fan.curve.set {fan, points, }        userspace temp→% curve (tick scheduler)
+  fan.curve.get / fan.curve.clear{fan}
+  wmi.raw     {guid, mid, in?(hex), out_len?}   raw eval through psense-wmi.ko
+  kb.get                                      keyboard state (method 21)
+  kb.zone.set {zones, rgb[r,g,b]}             per-zone colors (method 6)
+  kb.set      {mode, rgb, speed, brightness, dir, device}  16-byte frame (method 20)
+  fan.wmode   {fan, mode}                     auto|turbo|custom (method 14)
+  fan.wspeed  {pct, fan}                      custom % (methods 16+14)
+  fan.wget/get/fan.wmodes {fan}              register + mode reads (17/15)
+  fan.wtable                                  EC fan-table staging word (19)
+  memory                                      SMBIOS type-17 scan (RAM freq/type)
+  sysinfo                                     wsinfo snapshot (DMI/BIOS/OS/CPU/RAM/
+                                              storage/battery/network/devices, 30 s cache)
+  health                                      checkup health: battery design/full ratio,
+                                              per-disk smartctl -H verdict (root-only)
+                                              (§13.24; RAM has no runtime diagnostic on
+                                              Linux — renderer gets an honest 1004)
+  battmode.get                          battery charge mode truth (BatteryControl
+                                        id 20 BE*: function list + status array)
+  battmode.set {value}                  charge-mode switch (BatteryControl id 21
+                                        BE*: two-switch flow, EC-verified;
+                                        adaptive rejected by this EC) (§13.26)
+  usbcharge.get                         power-off USB charge state (APGeAction
+                                        id 2 GetFunction(0x04): enabled + threshold %)
+  usbcharge.set {enabled?, threshold?}  power-off USB charge write (APGeAction
+                                        id 1 SetFunction(0x04|sw<<8|thr<<16), EC-verified) (§13.29)
+  profile.get / profile.set {name}            platform-profile drives their 4 modes
+  gpu.oc.get                            GPU overclocking status (OEM profile offsets)
+  gpu.oc.set  {core, mem}               manual GPU core/memory clock offsets
+"""
+
+import argparse
+import ctypes
+import fcntl
+import glob
+import grp
+import json
+import os
+import platform
+import queue
+import select
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import ipaddress
+
+# Ensure modules in /usr/lib/predator-sense or local source directory can be imported
+sys.path.insert(0, "/usr/lib/predator-sense")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from psensed_lighting import DaemonLightingEngine, clamp_rgb
+from psensed_gpu_oc import GpuOverclockManager
+
+CACHE_S = 2.0        # sensor cache TTL
+DEBOUNCE_S = 2.0     # rpm is misleading right after mode writes
+WRITE_GAP = 0.03     # firmware pacing (Acer sleeps 30 ms between calls)
+EVAL_GAP = 0.20      # min gap BETWEEN evals: back-to-back evals stall in the
+                     # SMM for 5-22 s otherwise (ledger §13.27: unaffected ≥
+                     # ~180 ms, measured; 0.25 held a 70 ms margin, 0.20 keeps
+                     # 20 ms of headroom over the verified-safe line)
+FAMILY_GAP = 0.5     # extra wait when switching WMI GUID families (§13.27)
+TICK_S = 2.0         # curve scheduler period
+PWM_MAX = 255
+MODES = {"turbo": 0, "custom": 1, "auto": 2}
+ENABLE_NAME = {v: k for k, v in MODES.items()}
+FAN_TEMP_SENSOR = {1: "temp1_input", 2: "temp3_input"}  # CPU ch←temp1, GPU ch←temp3
+HYSTERESIS_PCT = 2   # rewrite only when curve target moves by this much
+
+LIGHTING_STATE_PATH = "/var/lib/predator-sense/lighting.json"
+LIGHTING_FALLBACK_PATH = "/run/predator-sense/lighting.json"
+
+
+def _save_lighting_state(state):
+    for path in (LIGHTING_STATE_PATH, LIGHTING_FALLBACK_PATH):
+        try:
+            d = os.path.dirname(path)
+            os.makedirs(d, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f)
+            os.replace(tmp, path)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _load_lighting_state():
+    for path in (LIGHTING_STATE_PATH, LIGHTING_FALLBACK_PATH):
+        try:
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    return json.load(f)
+        except Exception:
+            continue
+    return None
+
+
+def _kb_frame(mode, speed, bri, direction, rgb, device=1):
+    """16-B SetGamingKBBacklightEffect frame, controller-DLL layout.
+
+    AcerECKeyboardController::SetMode packs [0]=mode [1]=speed [2]=brightness
+    [3]=direction+1 [4..6]=R,G,B [7]=0 [8]=0x03 on-flag [9]=device (ledger
+    §13.14). Live-verified on PHN16-71 (2026-10-19): the EC consumes the RGB
+    from [4..6] and mode 1 BREATHING then animates natively at full
+    brightness. The earlier in-repo layout ([3]=0, [4]=dir, RGB at [5..7])
+    landed every byte one slot late — the blue channel hit the on-flag byte —
+    which is what made animated modes drop the backlight and forced the
+    userspace animation engine. STATIC (mode 0) never showed the bug because
+    its visuals come from the id-6 zone store, not the frame RGB."""
+    r, g, b = (max(0, min(255, int(c))) for c in rgb)
+    return bytes([mode & 0xFF, speed & 0xFF, bri & 0xFF,
+                  (int(direction) + 1) & 0xFF, r, g, b, 0x00,
+                  0x03, device & 0xFF, 0, 0, 0, 0, 0, 0])
+
+
+# ------------------------------------------------------- WMI module (M3)
+# /dev/psense-wmi exposes a whitelisted WMI-eval ioctl (CAP_SYS_ADMIN only);
+# the kernel enforces the ≥30 ms vendor pacing itself.  Guid slots must stay
+# in sync with src/psense-wmi/psense-wmi.c.
+PSWMI_DEV = "/dev/psense-wmi"
+GUID_SLOTS = {"gaming": 0, "apge": 1, "battery": 2, "generic": 3}
+EVAL_FMT = "=6I3Q"                  # pswmi_eval: 6×u32 + 3×u64, no padding (48 B)
+EVAL_IOCTL = 0xC0305001             # _IOWR('P', 1, 48)
+FAN_ID = {"cpu": 0x01, "gpu": 0x04, "both": 0x05}
+FAN_BITMAP = {"cpu": 0x0001, "gpu": 0x0008, "both": 0x0009}
+WMI_MODE = {"auto": 1, "turbo": 2, "custom": 3}
+WMI_MODE_NAME = {v: k for k, v in WMI_MODE.items()}
+# Keyboard EC-native animated mode ids (AcerECKeyboardController mode table,
+# ledger §13.14.6). These render INSIDE the EC from a single 16-B frame —
+# no per-frame SMM evals, zero steady-state CPU. WAVE/RAINBOW/NEON are
+# strip-only ids (absent from the KB table) and SCREEN/MUSIC are reactive;
+# those stay on the software engine.
+KB_EC_EFFECTS = {"BREATHING": 1, "SHIFTING": 4, "METEOR": 6, "TWINKLING": 7}
+WMI_TIMEOUT_S = 25.0   # defer/reply watchdog for one queued eval (kernel call
+                       # itself is uninterruptible — see _wmi_worker)
+
+
+class _Delegated:
+    """Sentinel returned by _delegate_wmi: the serve loop keeps the conn."""
+    def __repr__(self):
+        return "<wmi delegated>"
+
+
+WMI_DELEGATED = _Delegated()
+
+
+def _u64(*bytevals):
+    """Pack ≤8 byte values into one little-endian u64 argument."""
+    return struct.pack("<Q", sum((b & 0xFF) << (8 * i) for i, b in enumerate(bytevals)))
+
+
+class WmiCtl:
+    """Thin ctypes wrapper around the PSWMI_EVAL ioctl."""
+
+    _lock = threading.Lock()
+    last_family = None   # guid of the last eval
+    last_mid = None      # method id of the last eval
+    last_eval_t = 0.0    # monotonic time of the last eval
+
+    def __init__(self, path=PSWMI_DEV):
+        self.path = path
+        self._fd = None
+
+    def _open(self):
+        if self._fd is None:
+            self._fd = os.open(self.path, os.O_RDWR | os.O_CLOEXEC)
+        return self._fd
+
+    def eval(self, guid, mid, in_bytes=b"", out_len=64):
+        """Returns (status, data); raises OSError when the module is missing.
+        Cross-family guard: a switch between GUID families close on the heels
+        of the previous eval stalls inside the SMM for 5-22 s (ledger §13.27)
+        — wait out a short gap first. Method 6 successive writes use WRITE_GAP
+        (30ms, Acer firmware pacing) for high-FPS dynamic lighting."""
+        if guid not in GUID_SLOTS:
+            raise ValueError(f"unknown guid slot {guid!r}")
+        with self._lock:
+            now = time.monotonic()
+            if guid == "gaming" and mid == 6 and WmiCtl.last_family == "gaming" and WmiCtl.last_mid == 6:
+                target_gap = WRITE_GAP
+            else:
+                target_gap = EVAL_GAP
+            wait = target_gap - (now - WmiCtl.last_eval_t)
+            if WmiCtl.last_family not in (None, guid):
+                wait = max(wait, FAMILY_GAP)
+            if wait > 0:
+                time.sleep(wait)          # SMM defers near-simultaneous evals to
+                                          # its next periodic window (5-22 s!)
+            fd = self._open()
+            inb = bytes(in_bytes)
+            ib = ctypes.create_string_buffer(inb, max(len(inb), 1))
+            ob = ctypes.create_string_buffer(out_len if out_len else 1)
+            req = bytearray(struct.pack(EVAL_FMT, GUID_SLOTS[guid], mid, len(inb), out_len,
+                                        0, 0, ctypes.addressof(ib), ctypes.addressof(ob), 0))
+            fcntl.ioctl(fd, EVAL_IOCTL, req, True)
+            _, _, _, _, out_used, _, _, _, status = struct.unpack(EVAL_FMT, bytes(req))
+            data = ob.raw[:min(out_used, out_len)] if out_len else b""
+            WmiCtl.last_family, WmiCtl.last_mid, WmiCtl.last_eval_t = guid, mid, time.monotonic()
+            return status, data
+
+
+def read(path):
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return None
+
+
+def rd_num0(path):
+    try:
+        return int(float(read(path) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def write(path, value):
+    try:
+        open(path, "w").write(str(value))
+        return True
+    except OSError as e:
+        log(f"write {path}={value}: {e}" + (" (daemon needs root?)" if os.geteuid() != 0 else ""))
+        return False
+
+
+def log(msg):
+    print(f"psensed: {msg}", file=sys.stderr, flush=True)
+
+
+def find_acer_hwmon():
+    for h in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        if read(f"{h}/name") == "acer":
+            return h
+    return None
+
+
+def find_platform_profile():
+    for p in glob.glob("/sys/devices/platform/acer-wmi/platform-profile/platform-profile-*"):
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def pwm_nodes(h):
+    return sorted(glob.glob(f"{h}/pwm?"), key=lambda x: (len(x), x))
+
+
+def interp_pct(points, t):
+    """points sorted [(temp_c, pct)]; clamp below/above."""
+    if not points:
+        return None
+    if t <= points[0][0]:
+        return points[0][1]
+    if t >= points[-1][0]:
+        return points[-1][1]
+    for (t0, p0), (t1, p1) in zip(points, points[1:]):
+        if t <= t1:
+            f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            return round(p0 + f * (p1 - p0))
+    return points[-1][1]
+
+
+class Daemon:
+    def __init__(self, sock_path):
+        self.h = find_acer_hwmon()
+        if not self.h:
+            sys.exit("acer hwmon not found — is acer_wmi loaded?")
+        self.sock_path = sock_path
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.srv.bind(sock_path)
+        try:  # owner root, group wheel (user wheel members get daemon access)
+            os.chmod(sock_path, 0o660)
+            if os.geteuid() == 0:
+                os.chown(sock_path, 0, grp.getgrnam("wheel").gr_gid)
+        except (KeyError, OSError):
+            os.chmod(sock_path, 0o660)
+        self.srv.listen(128)
+
+        self.pwms = pwm_nodes(self.h)          # [["…/pwm1", "…/pwm2"]]
+        self.pwms_ok = bool(self.pwms)
+        self.sensor_cache = None
+        self.cache_ts = 0.0
+        self._sysinfo_cache = None
+        self._sysinfo_t = 0.0
+        self.last_write = 0.0
+        self.last_tick = 0.0
+        self.wmi = WmiCtl()
+        # WMI ops run one-at-a-time on a worker thread; the listen loop never
+        # blocks on a (possibly multi-second) kernel eval.  Completion is
+        # signalled back over a self-pipe so the main select loop stays live.
+        self.wmi_pipe_r, self.wmi_pipe_w = os.pipe()
+        os.set_blocking(self.wmi_pipe_r, False)
+        self.wmi_q = queue.Queue()
+        self.wmi_busy = False
+        self.wmi_result = None
+        self.wmi_conn = None
+        self.wmi_started = 0.0
+        self._last_lighting_zones = None
+        # Last column of per-zone colors committed directly by kb.zone.set
+        # (zone_bit → (r,g,b)). Animated kb.set/kb.effect frames bypass the
+        # zone store, so any of those ops invalidates this cache — it must
+        # never suppress a repaint that follows an animation or a manual
+        # frame write.
+        self._ec_zone_colors = {}
+        self.lighting_engine = DaemonLightingEngine(self._apply_lighting_frame)
+        # EC-native animated effect currently programmed into the keyboard
+        # ({"engine","effect","mode",...}) or None when static/software. The
+        # EC animates autonomously from one 16-B frame; a zone write or a
+        # switch to STATIC must retire that frame first (_kb_ensure_static).
+        self._ec_effect = None
+        self._last_kb_bri = 100
+        threading.Thread(target=self._wmi_worker, name="psensed-wmi", daemon=True).start()
+        # restore keyboard lighting if previous state was persisted
+        self.wmi_q.put(("kb.restore", {}))
+        # fan channel → {"points": [(t,pct)...], "last_pct": int|None}
+        self.curves = {}
+        self.gpu_oc = GpuOverclockManager()
+        try:
+            p = find_platform_profile()
+            if p:
+                cur_prof = read(f"{p}/profile")
+                if cur_prof:
+                    self.gpu_oc.apply_mode(cur_prof)
+        except Exception:
+            pass
+
+    def _apply_lighting_frame(self, zones):
+        """Pass computed dynamic lighting zone frame to WMI."""
+        if not zones:
+            return
+        w = self.wmi
+        count = len(zones)
+        if self._last_lighting_zones is None or len(self._last_lighting_zones) != count:
+            self._last_lighting_zones = [None] * count
+
+        # If all zones are identical, check if changed and write once to all zones
+        first = zones[0]
+        if all(z == first for z in zones):
+            if not all(lz == first for lz in self._last_lighting_zones):
+                r, g, b = first
+                for i in range(count):
+                    zb = 1 << i
+                    w.eval("gaming", 6, _u64(zb, r, g, b), 4)
+                    self._last_lighting_zones[i] = first
+        else:
+            for i, z in enumerate(zones):
+                if z != self._last_lighting_zones[i]:
+                    r, g, b = z
+                    zb = 1 << i
+                    w.eval("gaming", 6, _u64(zb, r, g, b), 4)
+                    self._last_lighting_zones[i] = z
+
+    # ------------------------------------------------------------------ io
+    def _read_temps(self, force=False):
+        now = time.time()
+        if not force and self.sensor_cache and now - self.cache_ts < CACHE_S:
+            return self.sensor_cache, False
+        data = {
+            "fans_rpm": {"cpu": read(f"{self.h}/fan1_input"), "gpu": read(f"{self.h}/fan2_input")},
+            "temps": {p: read(f"{self.h}/{p}")
+                      for p in sorted(os.listdir(self.h))
+                      if p.startswith("temp") and p.endswith("_input")},
+            "stale": now - self.last_write < DEBOUNCE_S,
+        }
+        self.sensor_cache, self.cache_ts = data, now
+        return data, True
+
+    def _fan_state(self, node):
+        idx = node[-1]
+        en = read(f"{node}_enable")
+        try:
+            mode_name = ENABLE_NAME.get(int(en), en)
+        except (TypeError, ValueError):
+            mode_name = en
+        return {
+            f"fan{idx}": {
+                "pwm": read(node),
+                "mode": mode_name,
+                "rpm": read(f"{self.h}/fan{idx}_input"),
+            }
+        }
+
+    def _set_custom(self, idx, pct):
+        idx = int(idx)
+        node = f"{self.h}/pwm{idx}"
+        if node not in self.pwms:                       # exact full-path match
+            log(f"_set_custom: no pwm node for fan {idx}")
+            return False
+        if read(f"{node}_enable") != "1":
+            if not write(f"{node}_enable", "1"):
+                return False
+            time.sleep(WRITE_GAP)
+        val = round(pct * PWM_MAX / 100)
+        ok = write(node, val)
+        self.last_write = time.time()
+        return ok
+
+    # ------------------------------------------------------- wmi ops (M3)
+    def _wmi_worker(self):
+        """Single WMI eval at a time; the listen loop never blocks on the kernel."""
+        while True:
+            name, args = self.wmi_q.get()
+            self.wmi_busy = True
+            t0 = time.time()
+            log(f"wmi op {name!r} started")
+            try:
+                self.wmi_result = self.op_wmi(name, args)
+            except BaseException as e:
+                self.wmi_result = {"error": f"wmi worker died: {e!r}"}
+            finally:
+                self.wmi_busy = False
+                self.wmi_q.task_done()
+                log(f"wmi op {name!r} finished in {time.time() - t0:.2f}s")
+                try:
+                    os.write(self.wmi_pipe_w, b"\x01")   # wake the select loop
+                except OSError:
+                    pass
+
+    def _delegate_wmi(self, name, args):
+        """Route a WMI op to the worker; instant 'busy' while one is running."""
+        if self.wmi_busy or self.wmi_conn is not None:
+            return {"error": ("wmi busy: another eval is running (or pending); "
+                              "retry shortly — reads are unaffected")}
+        self.wmi_q.put((name, dict(args)))
+        return WMI_DELEGATED
+
+    def _finish_wmi(self, timeout=False):
+        res = self.wmi_result
+        self.wmi_result = None
+        conn, self.wmi_conn = self.wmi_conn, None
+        if timeout and res is None:
+            res = {"error": (f"wmi eval wedged >{WMI_TIMEOUT_S}s; op still running in "
+                             "kernel — check dmesg and /proc/$(cat /run/psensed.pid)/stack")}
+        if conn is not None:
+            try:
+                conn.sendall((json.dumps(res) + "\n").encode())
+            except OSError as e:
+                log(f"wmi reply dropped (client gone): {e}")
+            try:
+                conn.close()
+            except OSError:
+                pass
+        elif res is not None and not (isinstance(res, dict) and res.get("restored") is not None):
+            log("late wmi result with no waiting client — dropped")
+
+    def _kb_ensure_static(self, force=False):
+        """Retire any active lighting (software engine or EC-native animated
+        frame) and put the EC back in STATIC so the id-6 zone store shows
+        through. A known-active EC frame (or force=True) always rewrites the
+        mode-0 frame — the EC's frame registers persist across daemon
+        restarts, so an animation must never keep running over fresh zone
+        colors."""
+        self.lighting_engine.stop_effect()
+        if not (force or self._ec_effect or self.lighting_engine.running):
+            return False
+        frame = _kb_frame(0, 0, self._last_kb_bri, 0, (0, 0, 0))
+        self.wmi.eval("gaming", 20, frame, 4)
+        self._ec_effect = None
+        return True
+
+    def _kb_apply_effect(self, eff, speed, brightness, direction, color,
+                         zone_count=4):
+        """Apply a named keyboard lighting effect.
+
+        EC-native modes (BREATHING, SHIFTING, METEOR, TWINKLING — the
+        AcerECKeyboardController mode table, ledger §13.14.6) become ONE
+        16-B frame the EC renders autonomously: zero steady-state CPU. The
+        userspace engine previously animated these at 26 fps ≈ 18 zone-write
+        SMM evals/s ≈ 0.3 core, for the same visual result. WAVE/RAINBOW/
+        NEON aliases follow the engine's own mapping; SCREEN/MUSIC stay
+        reactive (software engine)."""
+        eff_u = str(eff).upper()
+        if eff_u == "RAINBOW":
+            eff_u = "WAVE"
+        elif eff_u == "NEON":
+            eff_u = "SHIFTING"
+        mode_id = KB_EC_EFFECTS.get(eff_u)
+        if mode_id is not None:
+            frame = _kb_frame(mode_id, speed, brightness, direction, color)
+            status, data = self.wmi.eval("gaming", 20, frame, 4)
+            self._last_kb_bri = int(brightness) & 0xFF
+            self._ec_effect = {"engine": "ec-native", "effect": eff_u,
+                               "mode": mode_id, "speed": speed,
+                               "brightness": brightness,
+                               "direction": direction, "rgb": list(color)}
+            return {"status": status, "ack": data.hex(),
+                    "frame": frame.hex(), **self._ec_effect}
+        try:
+            self.lighting_engine.start_effect(
+                eff_u, speed=speed, brightness=brightness,
+                direction=direction, color=color, zone_count=zone_count
+            )
+        except ValueError as e:
+            return {"error": str(e)}
+        return {"engine": "software", **self.lighting_engine.get_status()}
+
+    def op_wmi(self, name, args):
+        """Ops through the psense-wmi module (/dev/psense-wmi, root only).
+        The kernel enforces whitelist + ≥30 ms pacing; daemon stays stateless."""
+        w = self.wmi
+
+        def _tm(tag, t):
+            d = time.time() - t
+            if d >= 0.05:
+                log(f"    battmode.timing {tag}: {d * 1000:.0f} ms")
+            return time.time()
+
+        try:
+            if name == "wmi.raw":
+                guid = args.get("guid", "gaming")
+                try:
+                    mid = int(args.get("mid", 0))
+                except (TypeError, ValueError):
+                    return {"error": "mid must be an int"}
+                inhex = args.get("in")
+                try:
+                    inb = bytes.fromhex(inhex.replace(" ", "")) if inhex else b""
+                except ValueError:
+                    return {"error": "in must be a hex string"}
+                out_len = min(int(args.get("out_len", 64)), 4096)
+                status, data = w.eval(guid, mid, inb, out_len)
+                u64s = [struct.unpack_from("<Q", data, i)[0]
+                        for i in range(0, len(data) - len(data) % 8, 8)]
+                return {"status": status, "out": data.hex(), "out_used": len(data), "u64": u64s}
+
+            if name == "kb.get":
+                status, data = w.eval("gaming", 21, struct.pack("<I", 1), 16)
+                out = {"status": status, "raw": data.hex()}
+                if len(data) >= 10:
+                    # EC state readout, live-calibrated 2026-10-19: a method-20
+                    # write of mode 1/speed 3/bri 100/rgb C7,3E,14 echoed
+                    # 00 01 03 64 .. c7 3e 14 .. 03 → [1]=mode, [2]=speed,
+                    # [3]=brightness, [4]=direction, [5..7]=16-B frame RGB,
+                    # [6..8]=zone-store RGB (overlapping echo window — after
+                    # id-6 zone writes the visible color sits here), [9]=0x03.
+                    # The old parse ([2]=mode, [6..8]=rgb) was off by one.
+                    out.update({
+                        "mode": data[1], "speed": data[2],
+                        "brightness": data[3], "dir": data[4],
+                        "frame_rgb": [data[5], data[6], data[7]],
+                        "rgb": [data[6], data[7], data[8]],
+                        "flag9": data[9],
+                    })
+                return out
+
+            if name == "kb.effect.set":
+                eff = args.get("effect")
+                self._ec_zone_colors.clear()   # animation repaints will bypass the zone store
+                if not eff:
+                    return {"error": "effect is required (BREATHING, WAVE, SHIFTING, METEOR, TWINKLING)"}
+                speed = args.get("speed", 3)
+                brightness = args.get("brightness", 100)
+                direction = args.get("direction", 1)
+                rgb = args.get("rgb") or args.get("color") or [0, 174, 199]
+                try:
+                    color = clamp_rgb(rgb)
+                except Exception:
+                    return {"error": "rgb/color must be [r,g,b] ints"}
+                zone_count = int(args.get("zone_count", 4))
+                res = self._kb_apply_effect(eff, speed, brightness,
+                                            direction, color, zone_count)
+                if "error" in res:
+                    return res
+                if res.get("status", 0) == 0:
+                    _save_lighting_state({"op": "kb.effect.set", "args": args})
+                return {"status": res.get("status", 0), "effect": res}
+
+            if name == "kb.effect.stop":
+                # "Stop" means "go static": retire the software engine AND any
+                # EC-native animated frame — otherwise the EC keeps animating
+                # over the zone store. Always writes the mode-0 frame (force).
+                self._kb_ensure_static(force=True)
+                self._ec_zone_colors.clear()   # EC now shows the zone store again
+                _save_lighting_state({"op": "kb.effect.stop", "args": {}})
+                return {"status": 0, "stopped": True}
+
+            if name == "kb.effect.get":
+                if self._ec_effect:
+                    return {"status": 0, "effect": dict(self._ec_effect)}
+                return {"status": 0, "effect": self.lighting_engine.get_status()}
+
+            if name == "kb.zone.set":
+                # Static zone write yields dynamic lighting.
+                # EC palette dedupe: an old client (or several concurrently
+                # running GUI instances) can re-send the identical palette
+                # continuously; every duplicate costs a 0.2-0.9 s SMM eval on
+                # the serialized worker and keeps the CPU/persona busy. Only
+                # zones whose direct zone color actually changes are written.
+                self._kb_ensure_static()   # retires engine + EC-native frame
+                self._ec_zone_colors.clear()   # stop may repaint zones
+                rgb = args.get("rgb", [0, 0, 0])
+                try:
+                    r, g, b = (max(0, min(255, int(x))) for x in rgb)
+                except (TypeError, ValueError):
+                    return {"error": "rgb must be [r,g,b] ints"}
+                zones = args.get("zones", "all")
+                if isinstance(zones, str) and zones in ("all", "1,2,3,4", "1234"):
+                    bits = (0x01, 0x02, 0x04, 0x08)
+                else:
+                    try:
+                        nums = [int(z) for z in str(zones).replace(",", " ").split()]
+                    except ValueError:
+                        return {"error": "zones: list of 1..4 or 'all'"}
+                    if not nums or any(n not in (1, 2, 3, 4) for n in nums):
+                        return {"error": "zones: list of 1..4 or 'all'"}
+                    bits = tuple(1 << (n - 1) for n in nums)
+                todo = [zb for zb in bits if self._ec_zone_colors.get(zb) != (r, g, b)]
+                if not todo:
+                    return {"zones": [f"kb-zone-{i+1}" for i in range(len(bits))],
+                            "applied": [], "skipped": "palette unchanged"}
+                applied = []
+                for zb in todo:
+                    if applied:
+                        time.sleep(WRITE_GAP)  # extra spacing beyond kernel pacing
+                    status, data = w.eval("gaming", 6, _u64(zb, r, g, b), 4)
+                    applied.append({"zone_bit": zb, "status": status})
+                    if status == 0:
+                        self._ec_zone_colors[zb] = (r, g, b)
+                if all(a.get("status") == 0 for a in applied):
+                    _save_lighting_state({"op": "kb.zone.set", "args": args})
+                return {"zones": [f"kb-zone-{i+1}" for i in range(len(bits))], "applied": applied}
+
+            if name == "kb.set":
+                self.lighting_engine.stop_effect()
+                self._ec_effect = None   # the frame written below supersedes any EC animation
+                try:
+                    mode = int(args.get("mode", 0)) & 0xFF
+                    speed = int(args.get("speed", 0)) & 0xFF
+                    bri = int(args.get("brightness", 100)) & 0xFF
+                    direction = int(args.get("dir", 0)) & 0xF
+                    device = int(args.get("device", 1)) & 0xFF
+                except (TypeError, ValueError):
+                    return {"error": "mode/speed/brightness/dir/device must be ints"}
+                rgb = args.get("rgb", [0, 0, 0])
+                try:
+                    r, g, b = (max(0, min(255, int(x))) for x in rgb)
+                except (TypeError, ValueError):
+                    return {"error": "rgb must be [r,g,b] ints"}
+                if mode in (0, 0xFF):   # STATIC/DIRECT: EC ignores speed≠0 (§13.20)
+                    speed = 0
+                frame = _kb_frame(mode, speed, bri, direction, (r, g, b), device)
+                status, data = w.eval("gaming", 20, frame, 4)
+                self._last_kb_bri = bri
+                self._ec_zone_colors.clear()   # 16-B frame does not update the zone store
+                if status == 0:
+                    _save_lighting_state({"op": "kb.set", "args": args})
+                return {"status": status, "ack": data.hex(), "frame": frame.hex()}
+
+            if name == "kb.restore":
+                state = _load_lighting_state()
+                if not state:
+                    return {"status": 0, "restored": False, "reason": "no saved state"}
+                op = state.get("op")
+                s_args = state.get("args", {})
+                if op == "kb.effect.set":
+                    eff = s_args.get("effect")
+                    speed = s_args.get("speed", 3)
+                    brightness = s_args.get("brightness", 100)
+                    direction = s_args.get("direction", 1)
+                    rgb = s_args.get("rgb") or s_args.get("color") or [0, 174, 199]
+                    zone_count = s_args.get("zone_count", 4)
+                    try:
+                        res = self._kb_apply_effect(
+                            eff, speed, brightness, direction,
+                            clamp_rgb(rgb), zone_count
+                        )
+                    except Exception as e:
+                        return {"status": -1, "restored": False, "op": op, "error": str(e)}
+                    if "error" in res:
+                        return {"status": -1, "restored": False, "op": op,
+                                "error": res["error"]}
+                    return {"status": 0, "restored": True, "op": op, "effect": res}
+                elif op == "kb.set":
+                    res = self.op_wmi("kb.set", s_args)
+                    return {"status": res.get("status", -1), "restored": True, "op": op, "detail": res}
+                elif op == "kb.zone.set":
+                    res = self.op_wmi("kb.zone.set", s_args)
+                    return {"status": 0, "restored": True, "op": op, "detail": res}
+                elif op == "kb.effect.stop":
+                    self._kb_ensure_static(force=True)
+                    return {"status": 0, "restored": True, "op": op, "detail": "stopped"}
+                return {"status": -1, "restored": False, "reason": f"unknown op {op}"}
+
+            if name == "fan.wmodes":
+                fan = args.get("fan", "both")
+                if fan not in FAN_BITMAP:
+                    return {"error": f"fan must be one of {list(FAN_BITMAP)}"}
+                status, data = w.eval("gaming", 15, struct.pack("<I", FAN_BITMAP[fan]), 8)
+                out = {"status": status, "raw": data.hex()}
+                if len(data) >= 2:
+                    cpu = data[1] & 0b11
+                    gpu = (data[1] >> 6) & 0b11
+                    out.update({"cpu_mode": WMI_MODE_NAME.get(cpu, cpu),
+                                "gpu_mode": WMI_MODE_NAME.get(gpu, gpu)})
+                return out
+
+            if name == "fan.wmode":
+                fan = args.get("fan", "both")
+                mode = args.get("mode")
+                if fan not in FAN_BITMAP or mode not in WMI_MODE:
+                    return {"error": f"fan ∈ {list(FAN_BITMAP)}, mode ∈ {list(WMI_MODE)}"}
+                bitmap = FAN_BITMAP[fan] & 0xFFFF
+                status, data = w.eval("gaming", 15, struct.pack("<I", FAN_BITMAP[fan]), 8)
+                cpu_cur = gpu_cur = WMI_MODE.get("auto", 1)
+                if status == 0 and len(data) >= 2:
+                    cpu_cur = data[1] & 0b11
+                    gpu_cur = (data[1] >> 6) & 0b11
+                cpu_new = WMI_MODE[mode] if fan in ("cpu", "both") else (cpu_cur or 1)
+                gpu_new = WMI_MODE[mode] if fan in ("gpu", "both") else (gpu_cur or 1)
+                status, data = w.eval("gaming", 14,
+                                      _u64(bitmap & 0xFF, (bitmap >> 8) & 0xFF,
+                                           (cpu_new & 0b11) | ((gpu_new & 0b11) << 6)), 4)
+                self.last_write = time.time()
+                return {"status": status, "ack": data.hex(),
+                        "applied": {"cpu": WMI_MODE_NAME.get(cpu_new, cpu_new),
+                                    "gpu": WMI_MODE_NAME.get(gpu_new, gpu_new)}}
+
+            if name == "fan.wspeed":
+                fan = args.get("fan", "cpu")
+                if fan not in FAN_BITMAP:
+                    return {"error": f"fan must be one of {list(FAN_BITMAP)}"}
+                try:
+                    pct = int(args.get("pct"))
+                except (TypeError, ValueError):
+                    return {"error": "pct required (0-100)"}
+                if not 0 <= pct <= 100:
+                    return {"error": "pct must be 0-100"}
+                fans = {"cpu": ["cpu"], "gpu": ["gpu"], "both": ["cpu", "gpu"]}[fan]
+                # the custom-speed register is inert unless the fan is in CUSTOM mode
+                mo = self.op_wmi("fan.wmode", {"fan": fan, "mode": "custom"})
+                if isinstance(mo, dict) and mo.get("status", 1) != 0:
+                    return {"error": "fan.wmode CUSTOM failed", "detail": mo}
+                out = {"switched": mo.get("applied")}
+                for f in fans:
+                    fid = FAN_ID[f]
+                    status, data = w.eval("gaming", 16,
+                                          struct.pack("<I", fid | (pct << 8)), 4)
+                    out[f"{f}_speed"] = {"pct": pct, "status": status, "ack": data.hex()}
+                self.last_write = time.time()
+                return out
+
+            if name == "fan.wget":
+                fan = args.get("fan", "cpu")
+                if fan not in ("cpu", "gpu"):
+                    return {"error": "fan must be cpu|gpu"}
+                status, data = w.eval("gaming", 17, struct.pack("<I", FAN_ID[fan]), 8)
+                out = {"status": status, "raw": data.hex()}
+                if len(data) >= 2:
+                    out["pct"] = data[1]
+                return out
+
+            if name == "fan.wtable":
+                status, data = w.eval("gaming", 19, b"", 8)
+                word = struct.unpack_from("<Q", data, 0)[0] if len(data) >= 8 else None
+                return {"status": status, "raw": data.hex(), "word": word}
+
+            if name == "battmode.get":
+                # BatteryControl GetBatteryHealthControlStatus (BE* id 20) —
+                # the live-verified charge-function truth (ledger §13.26).
+                # in  = [uBatteryNo=1, uFunctionQuery=1, reserved[2]
+                # out = [uFunctionList, uReturn[2], uFunctionStatus[5]] —
+                # status[0]==1 → Optimized enabled (functionMask 1); all 0 →
+                # Full/default charging; functionMask 4 = adaptive (rejected
+                # by this EC: uReturn 1). The old misc opcode-0x02 GET byte
+                # is the function list, not the mode — parity byte was moved
+                # out of the GET (§13.27: cross-family stall).
+                t = time.time()
+                status, data = w.eval("battery", 20, bytes([1, 1, 0, 0]), 8)
+                t = _tm("begb", t)
+                out = {"status": status, "raw": data.hex()}
+                if status == 0 and len(data) >= 8:
+                    out.update({"function_list": data[0],
+                                "function_status": list(data[3:8]),
+                                "optimized": data[3] == 1,
+                                "value": 0 if data[3] == 1 else 1})
+                return out
+
+            if name == "battmode.set":
+                # BatteryControl SetBatteryHealthControl (BE* id 21) — the
+                # live-verified charge-function switch (ledger §13.26); the
+                # same two-switch flow the CareCenter agent drives per mode:
+                #   0 Optimized = enable function 1 + disable function 4
+                #   1 Full      = disable function 1 + disable function 4
+                #   2 Adaptive  = disable function 1 + enable function 4
+                # This EC rejects function-4 writes (uReturn 1) — reported
+                # honestly; the renderer never offers mode 2.
+                try:
+                    v = int(args.get("value"))
+                except (TypeError, ValueError):
+                    return {"error": "value must be 0 (optimized), 1 (full) or 2 (adaptive)"}
+                if v not in (0, 1, 2):
+                    return {"error": "value must be 0 (optimized), 1 (full) or 2 (adaptive)"}
+
+                def besb(mask, flag):
+                    t = time.time()
+                    s, d = w.eval("battery", 21, bytes([1, mask, flag, 0, 0, 0, 0, 0]), 4)
+                    _tm(f"besb{mask}/{flag}", t)
+                    return {"status": s, "raw": d.hex()}
+
+                if v == 0:
+                    out = {"disable_adaptive": besb(4, 0), "optimized": besb(1, 1)}
+                elif v == 1:
+                    out = {"disable_adaptive": besb(4, 0), "disable_optimized": besb(1, 0)}
+                else:
+                    out = {"disable_optimized": besb(1, 0), "adaptive": besb(4, 1)}
+                out["status"] = 0
+                if all(x["status"] == 0 for x in out.values() if isinstance(x, dict) and "status" in x):
+                    t = time.time()
+                    st2, d2 = w.eval("battery", 20, bytes([1, 1, 0, 0]), 8)
+                    _tm("verify", t)
+                    if st2 == 0 and len(d2) >= 4:
+                        mode_now = 0 if d2[3] == 1 else 1
+                        out["reported"] = mode_now
+                        out["committed"] = mode_now == v
+                return out
+
+            if name == "usbcharge.get":
+                # APGeAction GetFunction(0x04) (WMAA id 2; ledger §13.29).
+                # out u64: byte0 = status (0=OK), byte1 = switch (0x0f=enabled,
+                # 0x1f=disabled), byte2 = battery limit % (10, 20, 30).
+                t = time.time()
+                status, data = w.eval("apge", 2, struct.pack("<I", 0x04), 8)
+                _tm("apge.usb.get", t)
+                out = {"status": status, "raw": data.hex()}
+                if status == 0 and len(data) >= 3:
+                    out["wmi_return"] = data[0]
+                    if data[0] != 0:
+                        out["status"] = data[0]
+                    else:
+                        out.update({
+                            "switch_byte": data[1],
+                            "enabled": data[1] == 0x0F,
+                            "threshold": data[2],
+                        })
+                return out
+
+            if name == "usbcharge.set":
+                # APGeAction SetFunction(0x04 | (sw<<8) | (thr<<16)) (WMAA id 1;
+                # ledger §13.29). Preserves whichever of enabled/threshold is
+                # omitted by reading GetFunction(0x04) first (matching
+                # OnSetUSBChargeSwitchPacket 0x1403636c1 in AcerQAAgent.exe).
+                t = time.time()
+                st0, d0 = w.eval("apge", 2, struct.pack("<I", 0x04), 8)
+                _tm("apge.usb.pre", t)
+                if st0 != 0 or len(d0) < 3 or d0[0] != 0:
+                    return {"error": "usbcharge.get pre-read failed", "status": st0 or d0[0], "raw": d0.hex()}
+                cur_en = d0[1] == 0x0F
+                cur_thr = d0[2] if d0[2] in (10, 20, 30) else 30
+                en = cur_en if args.get("enabled") is None else bool(args.get("enabled"))
+                if args.get("threshold") is not None:
+                    try:
+                        thr = int(str(args.get("threshold")).rstrip("%"))
+                    except (TypeError, ValueError):
+                        return {"error": "threshold must be 10, 20, or 30"}
+                    if thr not in (10, 20, 30):
+                        return {"error": "threshold must be 10, 20, or 30"}
+                else:
+                    thr = cur_thr
+                sw_byte = 0x0F if en else 0x1F
+                in_u64 = 0x04 | (sw_byte << 8) | ((thr & 0xFF) << 16)
+                t = time.time()
+                st1, d1 = w.eval("apge", 1, struct.pack("<Q", in_u64), 4)
+                _tm(f"apge.usb.set({sw_byte:#x},{thr})", t)
+                wmi_ret = d1[0] if len(d1) >= 1 else 0xFF
+                out = {"status": st1 if st1 != 0 else wmi_ret, "raw": d1.hex(),
+                       "requested": {"enabled": en, "threshold": thr}}
+                if st1 == 0 and wmi_ret == 0:
+                    t = time.time()
+                    st2, d2 = w.eval("apge", 2, struct.pack("<I", 0x04), 8)
+                    _tm("apge.usb.verify", t)
+                    if st2 == 0 and len(d2) >= 3 and d2[0] == 0:
+                        rep_en = d2[1] == 0x0F
+                        rep_thr = d2[2]
+                        out["reported"] = {"enabled": rep_en, "threshold": rep_thr, "switch_byte": d2[1]}
+                        out["committed"] = (rep_en == en and rep_thr == thr)
+                return out
+
+            return {"error": f"unknown wmi op {name!r}"}
+        except OSError as e:
+            return {"error": f"psense-wmi module unavailable: {e}"}
+
+    # ---------------------------------------------------------------- tick
+    def tick(self):
+        self.last_tick = time.time()
+        if not self.curves or not self.pwms_ok:
+            return
+        temps, _ = self._read_temps()
+        for idx, cv in self.curves.items():
+            raw = temps.get("temps", {}).get(FAN_TEMP_SENSOR.get(idx, "temp1_input"))
+            if raw is None:
+                continue
+            t = int(raw) / 1000.0
+            tgt = interp_pct(cv["points"], t)
+            if tgt is None:
+                continue
+            if cv["last_pct"] is None or abs(tgt - cv["last_pct"]) >= HYSTERESIS_PCT:
+                if self._set_custom(idx, tgt):
+                    cv["last_pct"] = tgt
+                    log(f"curve: fan{idx} {t:.0f}°C -> {tgt}%")
+
+    # ---------------------------------------------------------------- ops
+    def _misc(self, name, args):
+        if name == "sensors":
+            data, fresh = self._read_temps()
+            return {**data, "fresh": fresh}
+        if name == "info":
+            return {
+                "daemon": "psensed",
+                "acer_hwmon": self.h,
+                "platform_profile": find_platform_profile(),
+                "pwm_available": self.pwms_ok,
+                "wmi_dev": os.path.exists(PSWMI_DEV),
+                "socket": self.sock_path,
+                "curves": list(self.curves),
+                "product_name": read("/sys/class/dmi/id/product_name") or read("/sys/class/dmi/id/board_name") or "Acer Gaming Laptop",
+                "board_name": read("/sys/class/dmi/id/board_name") or "Unknown Board",
+                "sys_vendor": read("/sys/class/dmi/id/sys_vendor") or "Acer",
+                "bios_version": read("/sys/class/dmi/id/bios_version") or "Unknown BIOS",
+                "bios_date": read("/sys/class/dmi/id/bios_date") or "",
+            }
+        if name == "sysinfo":
+            return self.op_sysinfo(args)
+        if name == "fan.get":
+            out = {f"rpm_{k}": v for k, v in self._read_temps()[0]["fans_rpm"].items()}
+            for n in self.pwms:
+                out.update(self._fan_state(n))
+            out["pwm_available"] = self.pwms_ok
+            out["curves"] = {f"fan{k}": v["points"] for k, v in self.curves.items()}
+            return out
+        if name == "fan.reset":
+            return self._fan_write("mode", "auto", args.get("fan") or "both")
+        if name == "fan.mode" or name == "fan.speed":
+            return self._fan_write(name.split('.')[1], **args)
+        return {"error": f"unknown op {name!r}"}
+
+    def op_profile(self, name, args):
+        if name == "gpu.oc.get":
+            return self.gpu_oc.get_status()
+        if name == "gpu.oc.set":
+            try:
+                core = int(args.get("core", 0))
+                mem = int(args.get("mem", 0))
+            except (TypeError, ValueError):
+                return {"error": "core and mem offsets must be integers"}
+            return self.gpu_oc.set_offsets(core, mem)
+
+        p = find_platform_profile()
+        if not p:
+            return {"error": "platform-profile not found"}
+        if name == "profile.get":
+            return {"profile": read(f"{p}/profile"), "choices": (read(f"{p}/choices") or "").split()}
+        if name == "profile.set":
+            val = args.get("name") or args.get("choice")
+            choices = (read(f"{p}/choices") or "").split()
+            if val not in choices:
+                return {"error": f"invalid choice {val!r}", "choices": choices}
+            if not write(f"{p}/profile", val):
+                return {"error": "write failed"}
+            oc_res = self.gpu_oc.apply_mode(val)
+            return {"profile": val, "gpu_oc": oc_res}
+        if name == "switchkey.get":
+            c = read("/sys/module/acer_wmi/parameters/cycle_gaming_thermal_profile")
+            return {"mode": 0 if (c and c.strip().upper() == "Y") else 1}
+        if name == "switchkey.set":
+            mode = int(args.get("mode", 0))
+            val = "Y" if mode == 0 else "N"
+            ok = write("/sys/module/acer_wmi/parameters/cycle_gaming_thermal_profile", val)
+            return {"status": 0 if ok else -1, "mode": mode}
+        return {"error": f"unknown op {name!r}"}
+
+    op_system = op_profile
+
+    def op_memory(self, _args=None):     # DPS: SMBIOS type 17 walk (DMI table, root)
+        try:
+            data = open("/sys/firmware/dmi/tables/DMI", "rb").read()
+        except OSError as e:
+            return {"error": f"dmi read failed: {e}"}
+        MT = {18: "DDR", 19: "DDR2", 20: "DDR2 FB-DIMM", 24: "DDR3", 25: "FBD2",
+              26: "DDR4", 27: "LPDDR", 28: "LPDDR2", 29: "LPDDR3", 30: "LPDDR4",
+              31: "Logical NV", 32: "HBM", 33: "HBM2", 34: "DDR5", 35: "LPDDR5", 36: "HBM3"}
+        dimms = []
+        off = 0
+        while off + 4 <= len(data):
+            t, ln = data[off], data[off + 1]
+            if t == 127 or ln < 4:
+                break
+            rec = data[off:off + min(ln, len(data) - off)]
+            if t == 17 and ln >= 0x22:
+                size = struct.unpack("<H", rec[12:14])[0]
+                speed = struct.unpack("<H", rec[0x15:0x17])[0]
+                cfg = struct.unpack("<H", rec[0x20:0x22])[0]
+                mtype = MT.get(rec[0x12], f"type{rec[0x12]}")
+                if size and size != 0xFFFF:          # populated slot
+                    dimms.append({
+                        "size_mb": size & 0x7FFF if not (size & 0x8000) else size,
+                        "speed": speed, "configured": cfg, "type": mtype,
+                    })
+            # skip the structure's string area (double-null terminated)
+            p = off + ln
+            while p + 1 < len(data) and not (data[p] == 0 and data[p + 1] == 0):
+                p += 1
+            off = p + 2
+        best = next((d for d in dimms if d["speed"] or d["configured"]), {})
+        return {
+            "dimms": len(dimms), "total_mb": sum(d["size_mb"] for d in dimms),
+            "type": best.get("type"),
+            "frequency": best.get("configured") or best.get("speed") or 0,   # MT/s (their "MHz")
+            "speed_max": best.get("speed") or 0,
+        }
+
+    def op_sysinfo(self, _args=None):
+        """Their wsinfo DeviceInfo channel snapshot (honest Linux data), used
+        by the 4449 DeviceInfo + 4343 battery services the renderer polls.
+        Root-only because of /sys/class/dmi/id; 30 s cache for the burst."""
+        now = time.time()
+        if self._sysinfo_cache is not None and now - self._sysinfo_t < 30:
+            return self._sysinfo_cache
+
+        def dmi(name):
+            return read(f"/sys/class/dmi/id/{name}")
+
+        def rd_num(path):
+            try:
+                return int(float(read(path) or 0))
+            except ValueError:
+                return 0
+
+        bios_ver = dmi("bios_version") or "Unknown BIOS"
+        sw = bios_ver.split(".")
+        p_name = dmi("product_name") or dmi("board_name") or "Acer Gaming Laptop"
+        b_name = dmi("board_name") or "Unknown Board"
+        s_vendor = dmi("sys_vendor") or "Acer"
+        b_date = dmi("bios_date") or ""
+        p_family = dmi("product_family") or p_name
+
+        out = {
+            "product": p_name,
+            "product_name": p_name,
+            "product_family": p_family,
+            "board_name": b_name,
+            "sys_vendor": s_vendor,
+            "serial": dmi("product_serial") or dmi("board_serial") or "",
+            "uuid": dmi("product_uuid") or "",
+            "bios_vendor": dmi("bios_vendor") or s_vendor,
+            "bios_version": bios_ver,
+            "bios_date": b_date,
+            "board_vendor": dmi("board_vendor") or s_vendor,
+            "chid": dmi("product_sku") or "",
+            "bios_major": sw[0].strip("Vv") if sw and sw[0].strip("Vv").isdigit() else "",
+            "bios_minor": sw[1] if len(sw) > 1 else "",
+        }
+
+        osd = {}
+        try:
+            for ln in open("/etc/os-release"):
+                k, _, v = ln.partition("=")
+                if k in ("PRETTY_NAME", "VERSION_ID"):
+                    osd[k] = v.strip().strip('"')
+        except OSError:
+            pass
+        out["os"] = {
+            "OSEdition": osd.get("PRETTY_NAME") or "Linux",
+            "OSBits": "64-bit",
+            "OSVersion": osd.get("VERSION_ID") or "",
+            "OSBuildNumber": platform.release(),
+        }
+
+        cpu, cores = "", 0
+        try:
+            for ln in open("/proc/cpuinfo"):
+                if ln.startswith("model name") and not cpu:
+                    cpu = ln.split(":", 1)[1].strip()
+                elif ln.startswith("processor"):
+                    try:
+                        cores = max(cores, int(ln.split(":", 1)[1]) + 1)
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        mem = self.op_memory()
+        out["cpu"] = cpu
+        out["cpu_cores"] = cores
+        out["ram"] = {"total_mb": mem.get("total_mb") or 0,
+                      "type": mem.get("type") or "",
+                      "banks": mem.get("dimms") or 0}
+
+        # --- storage -------------------------------------------------------
+        mnts = []
+        try:
+            for ln in open("/proc/mounts"):
+                f0 = ln.split()
+                if len(f0) >= 3 and f0[0].startswith("/dev/") and \
+                        f0[2] not in ("squashfs", "iso9660") and f0[1] != "/boot/efi":
+                    mnts.append((f0[0], f0[1]))
+        except OSError:
+            pass
+
+        def usage(mnt):
+            try:
+                st = os.statvfs(mnt)
+                return round(st.f_blocks * st.f_frsize / 1e6), \
+                    round((st.f_blocks - st.f_bavail) * st.f_frsize / 1e6)
+            except OSError:
+                return "", ""
+
+        disks = []
+        for d in sorted(glob.glob("/sys/class/block/*")):
+            dev = d.rsplit("/", 1)[-1]
+            if dev.startswith(("loop", "zram", "ram", "dm-")):
+                continue
+            if dev.startswith("nvme") and not dev.endswith("n1"):
+                continue
+            if dev.startswith("sd") and dev[-1].isdigit():
+                continue
+            model = (read(f"{d}/device/model") or "").strip()
+            if not model:
+                continue
+            logical = []
+            for fsrc, mnt in mnts:
+                if fsrc[5:].startswith(dev):
+                    total, used = usage(mnt)
+                    logical.append({"Drive": mnt, "TotalSizeMB": str(total),
+                                    "UsedSizeMB": str(used)})
+            disks.append({
+                "Model": model,
+                "Type": "HDD" if read(f"{d}/queue/rotational") == "1" else "SSD",
+                "TotalSizeMB": round(rd_num(f"{d}/size") * 512 / 1e6),
+                "UsedSizeMB": logical[0]["UsedSizeMB"] if logical else "",
+                "Serial": (read(f"{d}/device/serial") or "").strip(),
+                "LogicalDisks": logical,
+            })
+        out["storage"] = disks
+
+        # --- battery -------------------------------------------------------
+        bat = {"capacity": 0, "status": "", "ac_online": None,
+               "remaining_seconds": -1, "cycle_count": 0}
+        for p in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+            # values drift — read live each call (no cached battery sobriety)
+            bat["capacity"] = rd_num(f"{p}/capacity")
+            bat["status"] = read(f"{p}/status") or ""
+            bat["cycle_count"] = rd_num(f"{p}/cycle_count")
+            nowv = read(f"{p}/energy_now") or read(f"{p}/charge_now") or ""
+            rate = read(f"{p}/power_now") or read(f"{p}/current_now") or ""
+            try:
+                if bat["status"] == "Discharging" and float(nowv) > 0 and float(rate) > 0:
+                    bat["remaining_seconds"] = int(float(nowv) / float(rate) * 3600)
+            except (TypeError, ValueError):
+                bat["remaining_seconds"] = -1
+            break
+        for p in sorted(glob.glob("/sys/class/power_supply/A*")):
+            try:
+                if open(f"{p}/type").read().strip() == "Mains":
+                    bat["ac_online"] = read(f"{p}/online") == "1"
+                    break
+            except OSError:
+                pass
+        out["battery"] = bat
+
+        # --- network -------------------------------------------------------
+        def pci_name(ven, dvc):
+            try:
+                in_v = False
+                vname = ""
+                for ln in open("/usr/share/hwdata/pci.ids"):
+                    if ln.startswith("#"):
+                        continue          # Intel sections carry comment lines
+                    if not ln.startswith("\t"):
+                        in_v = ln[:4].lower() == ven.lower()
+                        if in_v:
+                            vname = ln[6:].strip()
+                    elif in_v and not ln.startswith("\t\t") and ln[1:5].lower() == dvc.lower():
+                        return f"{vname} {ln[6:].strip()}"
+            except OSError:
+                pass
+            return dvc
+
+        nets = []
+        v6map = {}
+        try:
+            for ln in open("/proc/net/if_inet6"):
+                f0 = ln.split()
+                if len(f0) == 6:
+                    raw = f0[0]          # 32 nibbles, display order (no swap)
+                    if raw.startswith("fe80"):
+                        continue         # link-local — the old per-hextet
+                                         # reversal mangled fe80→08ef and
+                                         # then never matched this skip
+                                         # (ledger §13.23-amend)
+                    # RFC 5952 compressed form (8ef::3fbe:…) or honest empty
+                    v6map.setdefault(f0[5], str(ipaddress.IPv6Address(bytes.fromhex(raw))))
+        except OSError:
+            pass
+        for d in sorted(glob.glob("/sys/class/net/*")):
+            dev = d.rsplit("/", 1)[-1]
+            if dev == "lo" or dev.startswith(("docker", "veth", "virbr", "br-", "tun", "wg")):
+                continue
+            ipv4 = ""
+            try:
+                ifreq = struct.pack("256s", dev.encode()[:16])
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sfd:
+                    r = fcntl.ioctl(sfd, 0x8915, ifreq)      # SIOCGIFADDR
+                ipv4 = socket.inet_ntoa(r[20:24])
+            except OSError:
+                pass
+            modal = read(f"{d}/device/modalias") or ""
+            name = dev
+            if modal.startswith("pci:"):
+                full = pci_name(modal[9:13], modal[18:22]).strip()
+                if full:
+                    name = full.rstrip(", ")
+            nets.append({"Name": name, "IPv4": ipv4, "IPv6": v6map.get(dev, ""),
+                         "MACAddress": (read(f"{d}/address") or "").upper()})
+        out["network"] = nets
+
+        # --- DeviceManager (their ClassName fields) -------------------------
+        devices = []
+        if cpu:
+            man = "Intel" if "intel" in cpu.lower() else ("AMD" if "amd" in cpu.lower() else "")
+            devices.append({"ClassName": "Processor", "DeviceName": cpu,
+                            "DriverVersion": "", "Manufacturer": man, "HardwareID": []})
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--format=csv,noheader", "--query-gpu=name,driver_version"],
+                capture_output=True, text=True, timeout=5)
+            for row in r.stdout.strip().splitlines():
+                f0 = [c.strip() for c in row.split(",")]
+                if f0 and f0[0]:
+                    devices.append({"ClassName": "Display", "DeviceName": f0[0],
+                                    "DriverVersion": (f0 + [""])[1],
+                                    "Manufacturer": "NVIDIA", "HardwareID": []})
+        except Exception:
+            pass
+        try:
+            r = subprocess.run(["lspci", "-Dnnm"], capture_output=True, text=True, timeout=5)
+            for ln in r.stdout.splitlines():
+                if not any(k in ln for k in ("VGA compatible", "3D controller", "Display controller")):
+                    continue
+                seg = ln.split("]: ", 1)[-1]
+                nm = re.match(r"(.*?)\s+\[[0-9a-f]{4}:[0-9a-f]{4}\]", seg)
+                devname = nm.group(1) if nm else seg.split("[")[0].strip()
+                low = devname.lower()
+                if "nvidia" in low and any(g.get("Manufacturer") == "NVIDIA" for g in devices):
+                    continue          # already covered by nvidia-smi's cleaner name
+                man = next((m for m in ("NVIDIA", "Intel", "AMD", "ATI") if m.lower() in low), "")
+                if man == "Intel" and "(" not in devname:
+                    devname = devname.replace("Intel", "Intel(R)", 1)
+                devices.append({"ClassName": "Display", "DeviceName": devname,
+                                "DriverVersion": "", "Manufacturer": man, "HardwareID": []})
+        except Exception:
+            pass
+        for dd in disks:
+            devices.append({"ClassName": "DiskDrive", "DeviceName": dd["Model"],
+                            "DriverVersion": "", "Manufacturer": "", "HardwareID": []})
+        try:
+            for ln in open("/proc/asound/cards"):
+                if "]:" not in ln:
+                    continue
+                rest = ln.split("]:", 1)[1].strip()
+                nm = rest.split("-", 1)[1].strip() if "-" in rest else rest
+                if nm:
+                    devices.append({"ClassName": "MEDIA", "DeviceName": nm,
+                                    "DriverVersion": ln.split("]", 1)[0].lstrip(" "),
+                                    "Manufacturer": "", "HardwareID": []})
+        except OSError:
+            pass
+        out["devices"] = devices
+
+        self._sysinfo_t = now
+        self._sysinfo_cache = out
+        return out
+
+    def op_health(self, _args=None):
+        """Checkup hardware health (CareCenter CheckBattery/CheckStorage),
+        honest Linux equivalents: battery = design vs full capacity ratio
+        (>=80% -> 0 OK, else 1 attention); storage = per-disk `smartctl -H`
+        verdict (PASSED -> 0, FAILED -> 1, unknown -> -1); RAM has no Linux
+        runtime diagnostic (their CheckMemory stays unsupported). Root-only
+        (battery sysfs + smartctl device nodes)."""
+        # --- battery: ratio of current full vs design full ---------------
+        bat = {"battery_health": -1}
+        for p in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+            def uwh(k):
+                try:
+                    return int(read(f"{p}/{k}") or 0)
+                except ValueError:
+                    return 0
+            full, design = uwh("energy_full"), uwh("energy_full_design")
+            if not full or not design:        # charge-based Reporting Unit
+                full, design = uwh("charge_full") * 1000, uwh("charge_full_design") * 1000
+            if design > 0:
+                rat = round(full * 100.0 / design)
+                bat = {
+                    "battery_health": 0 if rat >= 80 else 1,
+                    "battery_full_raw": full, "battery_design_raw": design,
+                    "battery_capacity_ratio_pct": rat,
+                    "battery_cycle_count": rd_num0(f"{p}/cycle_count"),
+                    "battery_status": read(f"{p}/status") or "",
+                }
+                break
+
+        # --- storage: smartctl -H per physical disk -----------------------
+        disks = []
+        for d in sorted(glob.glob("/sys/class/block/*")):
+            dev = d.rsplit("/", 1)[-1]
+            if dev.startswith(("loop", "zram", "ram", "dm-")):
+                continue
+            if dev.startswith("nvme") and not dev.endswith("n1"):
+                continue
+            if dev.startswith("sd") and dev[-1].isdigit():
+                continue
+            model = (read(f"{d}/device/model") or "").strip()
+            if not model:
+                continue
+            health, status = -1, ""
+            try:
+                r = subprocess.run(["smartctl", "-H", f"/dev/{dev}"],
+                                   capture_output=True, text=True, timeout=8)
+                txt = (r.stdout or "") + "\n" + (r.stderr or "")
+                for ln in txt.splitlines():
+                    if "result:" in ln:
+                        status = ln.split("result:", 1)[1].strip()
+                low = status.lower()
+                health = 0 if "passed" in low else \
+                    (1 if ("failed" in low or "error" in low) else -1)
+            except Exception:
+                pass
+            rot = read(f"{d}/queue/rotational") == "1"
+            disks.append({
+                "dev": f"/dev/{dev}", "model": model, "index": len(disks),
+                "media": 3 if rot else (6 if dev.startswith("nvme") else 4),
+                "media_name": "HDD" if rot else
+                    ("NVME" if dev.startswith("nvme") else "SSD"),
+                "total_mb": round(rd_num0(f"{d}/size") * 512 / 1e6),
+                "health": health, "smart_status": status,
+            })
+
+        return {
+            "battery": bat,
+            "disks": disks,
+            # RAM: honest + though-way — no Linux runtime diagnostic exists
+            # (Windows uses its own Memory Diagnostic); renderer shows an
+            # honest failure, tiles keep their own persisted state.
+            "ram": {"health": -1},
+        }
+
+    def _fan_write(self, action, mode=None, pct=None, fan="both", **_):
+        if not self.pwms_ok:
+            return {"error": "pwm nodes not available — unlock with rules/m1-fan-test.sh (force_caps)"}
+        if action == "mode":
+            if mode not in MODES:
+                return {"error": f"mode must be one of {list(MODES)}"}
+            val = MODES[mode]
+            applied = {}
+            for n in self.pwms:
+                idx = int(n[-1])
+                if fan not in ("both", "cpu" if idx == 1 else "gpu"):
+                    continue
+                if write(f"{n}_enable", val):
+                    applied[f"fan{idx}"] = mode
+                    self.last_write = time.time()
+                    if mode == "auto":
+                        self.curves.pop(idx, None)          # firmware auto takes over
+                    elif mode == "custom":
+                        self.curves.setdefault(idx, {"points": [], "last_pct": None})
+            out = {"applied": applied}
+            if not applied:
+                out["note"] = "no channel changed — daemon needs root and unlocked pwm"
+            return out
+        if action == "speed":
+            try:
+                pct = int(pct)
+            except (TypeError, ValueError):
+                return {"error": "pct required (0-100)"}
+            if not 0 <= pct <= 100:
+                return {"error": "pct must be 0-100"}
+            applied = {}
+            for n in self.pwms:
+                idx = int(n[-1])
+                if fan not in ("both", "cpu" if idx == 1 else "gpu"):
+                    continue
+                if self._set_custom(idx, pct):
+                    applied[f"fan{idx}"] = pct
+                    self.curves.pop(idx, None)   # fixed % takes over the curve scheduler
+            out = {"applied": applied}
+            if not applied:
+                out["note"] = "no channel changed — daemon needs root and unlocked pwm"
+            return out
+        return {"error": f"unknown action {action!r}"}
+
+    def op_fan(self, name, args):
+        if name == "fan.curve.set":
+            idx = {"cpu": 1, "gpu": 2}.get(args.get("fan"))
+            if idx is None:
+                return {"error": "fan must be cpu|gpu"}
+            pts = args.get("points")
+            if isinstance(pts, str):
+                try:
+                    pts = sorted(tuple(map(int, p.split(":", 1))) for p in pts.split() if p)
+                except (ValueError, IndexError):
+                    return {"error": "points format: '<temp>:<pct> [<temp>:<pct> …]'"}
+            if not isinstance(pts, list) or len(pts) < 2:
+                return {"error": "provide ≥2 points"}
+            for t, pct in pts:
+                if not 0 <= t <= 120 or not 0 <= pct <= 100:
+                    return {"error": f"invalid point {t}:{pct}"}
+            self.curves[idx] = {"points": sorted(pts), "last_pct": None}
+            self.tick()
+            return {"registered": {f"fan{idx}": self.curves[idx]["points"]}}
+
+        if name == "fan.curve.get":
+            return {"curves": {f"fan{k}": v["points"] for k, v in self.curves.items()}}
+
+        if name == "fan.curve.clear":
+            idx = {"cpu": 1, "gpu": 2}.get(args.get("fan"))
+            if idx not in self.curves:
+                return {"error": f"no curve for fan {idx}"}
+            del self.curves[idx]
+            out = self._fan_write("mode", "auto", fan="cpu" if idx == 1 else "gpu")
+            return {"cleared": f"fan{idx}", **out}
+
+        return {"error": f"unknown op {name!r}"}
+
+    # ---------------------------------------------------------------- loop
+    def serve(self):
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+        self.last_tick = 0.0
+        log(f"listening on {self.sock_path} (hwmon {self.h}, pwm={'yes' if self.pwms_ok else 'no'})")
+        while True:
+            timeout = max(0.1, TICK_S - (time.time() - self.last_tick))
+            r, _, _ = select.select([self.srv, self.wmi_pipe_r], [], [], timeout)
+            if self.srv in r:
+                conn = None
+                try:
+                    conn, _ = self.srv.accept()
+                    conn.settimeout(3)
+                    buf = b""
+                    while not buf.endswith(b"\n"):
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        if len(buf) > 65536:
+                            break
+                    if buf.strip():
+                        try:
+                            reply = self._dispatch(json.loads(buf.decode()))
+                        except Exception as e:  # one bad request must not kill the daemon
+                            reply = {"error": f"bad request: {e}"}
+                        if reply is WMI_DELEGATED:
+                            # reply arrives when the worker signals completion
+                            self.wmi_conn, self.wmi_started = conn, time.time()
+                            conn = None
+                        else:
+                            conn.sendall((json.dumps(reply) + "\n").encode())
+                except OSError as e:
+                    log(f"client error: {e}")
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except OSError:
+                            pass
+            if self.wmi_pipe_r in r:
+                os.read(self.wmi_pipe_r, 4096)      # drain the signal byte(s)
+                self._finish_wmi()
+            if self.wmi_conn is not None and time.time() - self.wmi_started > WMI_TIMEOUT_S:
+                self._finish_wmi(timeout=True)
+            if time.time() - self.last_tick >= TICK_S:
+                try:
+                    self.tick()
+                except Exception as e:
+                    log(f"tick error: {e}")
+
+    def _dispatch(self, req):
+        name = str(req.get("op", ""))
+        if name in ("sensors", "info", "sysinfo", "fan.get", "fan.reset", "fan.mode", "fan.speed"):
+            return self._misc(name, {k: v for k, v in req.items() if k != "op"})
+        if name.startswith("profile.") or name.startswith("switchkey.") or name.startswith("gpu.oc."):
+            return self.op_profile(name, {k: v for k, v in req.items() if k != "op"})
+        if name == "memory":
+            return self.op_memory()
+        if name == "sysinfo":
+            return self.op_sysinfo()
+        if name == "health":
+            return self.op_health()
+        if name.startswith("fan.curve"):
+            return self.op_fan(name, {k: v for k, v in req.items() if k != "op"})
+        if name == "wmi.raw" or name.startswith(("kb.", "fan.w", "battmode.", "usbcharge.")):
+            return self._delegate_wmi(name, {k: v for k, v in req.items() if k != "op"})
+        return {"error": f"unknown op {name!r}"}
+
+
+def cleanup(self):
+    try:
+        os.unlink(self.sock_path)
+    except OSError:
+        pass
+
+
+Daemon.cleanup = cleanup
+Daemon.__exit__ = cleanup
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="psensed")
+    ap.add_argument("--socket", default="/run/psense.sock")
+    a = ap.parse_args()
+    d = Daemon(a.socket)
+    try:
+        open("/run/psensed.pid", "w").write(str(os.getpid()))
+    except OSError:
+        pass
+    try:
+        d.serve()
+    finally:
+        d.cleanup()
+        try:
+            os.unlink("/run/psensed.pid")
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

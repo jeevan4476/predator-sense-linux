@@ -1,0 +1,15 @@
+dist/
+**/node_modules/
+*.rpm
+*.tar.gz
+**/__pycache__/
+.superpowers/
+src/psense-electron/app/
+# local-only build/RE helper trees and runtime captures — never publish
+src/psense-electron/debug/
+analysis/reference/
+tools/
+run/
+# dev-only systemd unit (points at the developer's checkout; the packaged
+# unit is packaging/psensed.service)
+src/psensed.service

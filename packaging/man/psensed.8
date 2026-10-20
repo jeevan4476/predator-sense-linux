@@ -1,0 +1,47 @@
+.\" Predator Sense Linux
+.TH PSENSED 8 "2026-10-18" "predator-sense 5.0.1463" "System Administration"
+.SH NAME
+psensed \- Predator Sense Linux root service (fan/profile/lighting/battery control)
+.SH SYNOPSIS
+.B psensed
+.RI [ options ]
+.SH DESCRIPTION
+Root daemon implementing the JSON API of Predator Sense Linux on the
+unix socket
+.I /run/psense.sock
+(root:wheel 0660): sensor inventory, thermal profile and fan control (hwmon
+and Acer WMI fan tables), keyboard RGB, battery charge mode over the vendor
+BatteryControl WMI surface, system info built from /sys + SMBIOS + DMI, and
+health checks.  The daemon serializes all WMI evaluations on one worker
+thread with a minimum inter\-eval spacing (and a larger family switch gap)
+because the ACPI SMM handler defers near-simultaneous vendor method calls to
+its next periodic window, which turns back\-to\-back calls into 5\-22 s stalls.
+.SH OPTIONS
+.TP
+.B \-\-help
+List daemon options.
+.SH SERVICE
+.B systemctl start psensed.service
+(unit installed as
+.IR /usr/lib/systemd/system/psensed.service ).
+The daemon is stateless; per-user state lives in
+.IR ~/.config/predator-sense-linux-*.json .
+.SH SECURITY
+Listens on a root-owned unix socket only; the WMI path is also gated in the
+kernel module /dev/psense\-wmi by a GUID/method allow-mask so arbitrary
+vendor method calls cannot be made by clients.  All writes go through the
+daemon (the CLI and GUI are unprivileged clients).
+.SH FILES
+.TP
+.I /run/psense.sock
+JSON API
+.TP
+.I /dev/psense-wmi
+kernel module ioctl surface used for vendor WMI evals
+.SH SEE ALSO
+.BR psense (1),
+.BR predator-sense (1)
+.PP
+The vendor WMI surfaces themselves are documented in spec/protocol.md of the
+predator-sense-linux source tree; the acer\-wmi platform driver provides the
+platform-profile interface.
