@@ -113,7 +113,7 @@ Predator Sense Linux follows a strict Unix separation-of-concerns model:
 │                 ▼                                 ▼                    │
 │   ┌────────────────────────────────────────────────────────────────┐   │
 │   │                     `psensed` Root Daemon                      │   │
-│   │   - Manages serialized WMI dispatch queue (≥250ms spacing)     │   │
+│   │   - Manages serialized WMI dispatch queue (≥200ms spacing)     │   │
 │   │   - Userspace fan temperature curve loop with hysteresis       │   │
 │   │   - Local state cache, SMBIOS reader, & battery limiter        │   │
 │   └─────────────────────────────┬──────────────────────────────────┘   │
@@ -152,7 +152,7 @@ Interacting directly with firmware (ACPI WMI, IO ports, and the Embedded Control
 1. **Root Daemon (`psensed`)**: Runs as a minimal background `systemd` system service. It owns the character device `/dev/psense-wmi` and the control socket `/run/psense.sock`.
 2. **Standard Group Permissions**: `/run/psense.sock` is created with permissions `0660` owned by `root:wheel`. Any user belonging to the `wheel` (or configured administrative) group can monitor sensors, change thermal profiles, tune fans, and control lighting without `sudo`.
 3. **Allow-Listed WMI Dispatch**: The `psense-wmi` kernel driver enforces a strict in-kernel allow-list for WMI GUIDs (`AcerGamingFunction`, `BatteryControl`) and valid method IDs. Arbitrary EC writes are blocked at the driver boundary.
-4. **Hardware Pacing Guard**: Acer's firmware SMM defers overlapping WMI calls, causing multi-second desktop lockups if queried concurrently. `psensed` enforces a single-threaded queue with a minimum 250 ms gap between evaluations, ensuring 100% stable operations.
+4. **Hardware Pacing Guard**: Acer's firmware SMM defers overlapping WMI calls, causing multi-second desktop lockups if queried concurrently. `psensed` enforces a single-threaded queue with a minimum 200 ms gap between evaluations (500 ms across GUID families), ensuring 100% stable operations.
 
 ---
 
