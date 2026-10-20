@@ -151,7 +151,9 @@ def cmd_fan(args):
             elif args.action == "speed":
                 op = {"op": "fan.speed", "pct": args.value, "fan": args.fan or "both"}
             else:
-                op = {"op": "fan.reset"}
+                # forward the channel selection (E1 client half: this used to
+                # send a bare op, so --fan cpu silently reset both fans)
+                op = {"op": "fan.reset", "fan": args.fan}
             r = daemon_req(op)
             if r is not None:
                 print(json.dumps(r, indent=2))
