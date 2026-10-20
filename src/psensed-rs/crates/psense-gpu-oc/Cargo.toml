@@ -1,0 +1,8 @@
+[package]
+name = "psense-gpu-oc"
+description = "psensed GPU overdrive port (nvidia settings + INI fixture parity)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
