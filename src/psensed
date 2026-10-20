@@ -55,6 +55,7 @@ import json
 import os
 import platform
 import queue
+import re
 import select
 import signal
 import socket
@@ -953,7 +954,9 @@ class Daemon:
             out["curves"] = {f"fan{k}": v["points"] for k, v in self.curves.items()}
             return out
         if name == "fan.reset":
-            return self._fan_write("mode", "auto", args.get("fan") or "both")
+            # fan selects which channel resets (/int spec §7.1 E1: previously
+            # passed positionally as pct and silently ignored)
+            return self._fan_write("mode", "auto", fan=args.get("fan") or "both")
         if name == "fan.mode" or name == "fan.speed":
             return self._fan_write(name.split('.')[1], **args)
         return {"error": f"unknown op {name!r}"}
@@ -1436,9 +1439,12 @@ class Daemon:
             return {"curves": {f"fan{k}": v["points"] for k, v in self.curves.items()}}
 
         if name == "fan.curve.clear":
-            idx = {"cpu": 1, "gpu": 2}.get(args.get("fan"))
+            fan_arg = args.get("fan")
+            idx = {"cpu": 1, "gpu": 2}.get(fan_arg)
+            if idx is None:
+                return {"error": "fan must be cpu|gpu"}
             if idx not in self.curves:
-                return {"error": f"no curve for fan {idx}"}
+                return {"error": f"no curve for fan {fan_arg}"}
             del self.curves[idx]
             out = self._fan_write("mode", "auto", fan="cpu" if idx == 1 else "gpu")
             return {"cleared": f"fan{idx}", **out}
