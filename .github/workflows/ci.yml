@@ -36,3 +36,18 @@ jobs:
           bash -n src/psense-wmi/install-dkms.sh
       - name: backend(node) tests
         run: node --test tests/test_backend_lighting.js
+  rust:
+    # psensed-rs workspace: byte-contract tests + strict lint gate.
+    separate job so a toolchain hiccup never blocks the python/node lanes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: cargo test (byte-locked frame + effect table parity)
+        working-directory: src/psensed-rs
+        run: cargo test --workspace
+      - name: cargo clippy (-D warnings)
+        working-directory: src/psensed-rs
+        run: cargo clippy --workspace -- -D warnings

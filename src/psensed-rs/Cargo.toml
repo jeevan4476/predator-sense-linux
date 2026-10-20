@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/psense-protocol",
+    "crates/psense-engine",
+    "crates/psense-gpu-oc",
+    "crates/psensed-core",
+    "crates/psensed",
+]
+
+[workspace.package]
+edition = "2021"
+version = "5.0.1463-rs0"
+license = "MIT"
+
+# single-source dependency versions for the whole daemon workspace
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

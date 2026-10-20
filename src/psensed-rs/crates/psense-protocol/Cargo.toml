@@ -1,0 +1,10 @@
+[package]
+name = "psense-protocol"
+description = "psensed wire protocol and EC keyboard-frame contract (protocol-as-code)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -13,3 +13,6 @@ run/
 # dev-only systemd unit (points at the developer's checkout; the packaged
 # unit is packaging/psensed.service)
 src/psensed.service
+# psensed-rs: rust workspace
+# glibc builds by default (musl optional later); catch all target artifacts
+src/psensed-rs/target/

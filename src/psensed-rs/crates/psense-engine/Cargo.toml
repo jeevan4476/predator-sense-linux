@@ -1,0 +1,9 @@
+[package]
+name = "psense-engine"
+description = "psensed lighting engine port (mathematical effects + zone write policy)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+psense-protocol = { path = "../psense-protocol" }
