@@ -19,6 +19,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - name: bun install (electron shim devDeps for TS toolchain)
+        working-directory: src/psense-electron
+        run: bun install --frozen-lockfile
+      - name: typecheck electron shims (TS strict, B-lite emit model)
+        working-directory: src/psense-electron
+        run: bun run typecheck
       - name: python tests (daemon, cli lighting, gpu-oc)
         run: |
           python3 -m unittest tests.test_cli_lighting \
