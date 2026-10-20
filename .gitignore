@@ -13,3 +13,6 @@ run/
 # dev-only systemd unit (points at the developer's checkout; the packaged
 # unit is packaging/psensed.service)
 src/psensed.service
+
+# B-lite build outputs: emitted by tsc from the authoritative .ts twin
+src/psense-electron/lighting-engine.js

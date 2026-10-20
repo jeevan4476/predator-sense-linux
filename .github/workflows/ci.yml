@@ -28,6 +28,9 @@ jobs:
       - name: typecheck electron shims (TS strict, B-lite emit model)
         working-directory: src/psense-electron
         run: bun run typecheck
+      - name: build electron shims (emit B-lite js twins)
+        working-directory: src/psense-electron
+        run: bun run build
       - name: python tests (daemon, cli lighting, gpu-oc)
         run: |
           python3 -m unittest tests.test_cli_lighting \
