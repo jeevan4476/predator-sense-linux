@@ -41,6 +41,7 @@ jobs:
           node --check src/psense-electron/backend.js
           node --check src/psense-electron/main.js
           node --check src/psense-electron/lighting-engine.js
+          node --check src/psense-electron/preload.js
       - name: syntax-check installer scripts
         run: |
           bash -n setup.sh

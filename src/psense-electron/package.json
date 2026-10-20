@@ -8,7 +8,8 @@
   "scripts": {
     "start": "electron .",
     "typecheck": "tsc -p . --noEmit",
-    "build": "tsc -p ."
+    "build": "tsc -p .",
+    "generate:ddsc": "node generate-ddsc-dts.mjs"
   },
   "dependencies": {
     "@electron/remote": "^2.1.3",
