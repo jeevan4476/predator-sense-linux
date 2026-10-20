@@ -158,9 +158,11 @@ Interacting directly with firmware (ACPI WMI, IO ports, and the Embedded Control
 
 ## Installation
 
-### Route 1: Fedora / RHEL (RPM Package - Recommended)
+### Route 1: Fedora / RHEL — build RPMs locally
 
-Pre-built RPM packages integrate cleanly with system paths, FHS standards, and package managers.
+No binary packages are published (source-only policy); on Fedora/RHEL you can
+build the distribution RPMs yourself from this tree. They integrate cleanly
+with system paths, FHS standards, and package managers.
 
 ```bash
 # 1. Build the distribution tarball and RPMs locally
@@ -188,28 +190,30 @@ sudo systemctl enable --now psensed
 predator-sense
 ```
 
-### Route 2: Universal Tarball & Installer (`install.sh`)
+### Route 2: One-command source setup (`setup.sh`)
 
-Works on any Linux distribution (Ubuntu, Debian, Fedora, Arch, openSUSE):
+Works on any Linux distribution (Fedora/RHEL is the tested target; apt/pacman
+get their packages automatically):
 
 ```bash
-# 1. Install prerequisites (DKMS, kernel headers, Node.js 18+, Python 3)
-# On Debian/Ubuntu: sudo apt install dkms linux-headers-$(uname -r) nodejs python3 smartmontools
-# On Fedora:        sudo dnf install dkms kernel-devel nodejs python3 smartmontools
-# On Arch:          sudo pacman -S dkms linux-headers nodejs python smartmontools
-
-# 2. Build and register the kernel module with DKMS
-sudo bash src/psense-wmi/install-dkms.sh
-
-# 3. Run the installer (installs systemd service, CLI, launcher, and desktop entry)
-sudo packaging/install.sh
-
-# 4. Verify CLI and launch GUI
-psense checkup
-predator-sense
+git clone https://github.com/jeevan4476/predator-sense-linux.git
+cd predator-sense-linux
+sudo ./setup.sh
 ```
 
-To uninstall at any time: `sudo packaging/install.sh --remove`.
+`setup.sh` performs the **whole setup in one run**:
+
+1. checks and installs prerequisites (DKMS, kernel headers, gcc/make, Python 3, `smartmontools`) — asks before installing, `--yes` to auto-confirm;
+2. builds and registers the `psense-wmi` kernel module via DKMS, hot-swaps it and persists the boot autoload;
+3. installs the CLI (`psense`), the root daemon (`psensed`) and the systemd unit, then enables the daemon;
+4. installs the Electron GUI (launcher, desktop entry, icon) — **only if** the vendored renderer bundle `src/psense-electron/app/` exists in your tree; on a fresh public clone that payload is absent (see [Source-only distribution policy](#source-only-distribution-policy)) and this stage is skipped with an explanation — the CLI + daemon from stage 3 are fully functional;
+5. verifies the socket, the `/dev/psense-wmi` node and a live `psense fan status` read.
+
+Flags: `--remove` (full uninstall incl. DKMS module and boot autoload),
+`--unit` (CLI + daemon only), `--gui` (GUI only), `--no-kmod`, `--yes`.
+
+`packaging/install.sh` remains as a compatibility wrapper (`exec setup.sh`)
+so tarball-based workflows keep working.
 
 ### Route 3: Arch Linux
 

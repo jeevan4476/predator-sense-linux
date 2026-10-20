@@ -29,5 +29,10 @@ jobs:
           node --check src/psense-electron/backend.js
           node --check src/psense-electron/main.js
           node --check src/psense-electron/lighting-engine.js
+      - name: syntax-check installer scripts
+        run: |
+          bash -n setup.sh
+          bash -n packaging/install.sh
+          bash -n src/psense-wmi/install-dkms.sh
       - name: backend(node) tests
         run: node --test tests/test_backend_lighting.js
