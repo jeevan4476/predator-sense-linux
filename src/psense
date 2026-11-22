@@ -134,8 +134,9 @@ def cmd_fan(args):
     # Writes and rich status go through psensed when reachable (works for any
     # wheel user); fall back to direct sysfs (needs root) when no daemon runs.
     if args.action in ("status", "mode", "speed", "reset"):
+        sock = getattr(args, "sock", "/run/psense.sock")
         if args.action == "status":
-            r = daemon_req({"op": "fan.get"})
+            r = daemon_req({"op": "fan.get"}, sock)
             if r is not None and "error" not in r:
                 out = {"rpm": {"cpu": r.get("rpm_cpu"), "gpu": r.get("rpm_gpu")},
                        "pwm_supported": r.get("pwm_available"),
@@ -145,14 +146,16 @@ def cmd_fan(args):
                         out[k] = r[k]
                 print(json.dumps(out, indent=2))
                 return
-        elif daemon_req({"op": "info"}) is not None:      # daemon reachable
+        elif daemon_req({"op": "info"}, sock) is not None:      # daemon reachable
             if args.action == "mode":
                 op = {"op": "fan.mode", "mode": args.value, "fan": args.fan or "both"}
             elif args.action == "speed":
                 op = {"op": "fan.speed", "pct": args.value, "fan": args.fan or "both"}
             else:
-                op = {"op": "fan.reset"}
-            r = daemon_req(op)
+                # forward the channel selection (E1 client half: this used to
+                # send a bare op, so --fan cpu silently reset both fans)
+                op = {"op": "fan.reset", "fan": args.fan}
+            r = daemon_req(op, sock)
             if r is not None:
                 print(json.dumps(r, indent=2))
                 if "error" not in r:
@@ -174,9 +177,14 @@ def cmd_fan(args):
             if have_pwm:
                 for p in pwms:
                     idx = p[-1]
+                    en = read(f"{p}_enable")
+                    try:
+                        mode_name = ENABLE_NAME.get(int(en), en)
+                    except (TypeError, ValueError):
+                        mode_name = en
                     nodes[f"fan{idx}"] = {
                         "pwm": read(p),
-                        "mode": ENABLE_NAME.get(read(f"{p}_enable"), read(f"{p}_enable")),
+                        "mode": mode_name,
                     }
             print(json.dumps(nodes, indent=2))
             if not have_pwm:
@@ -217,9 +225,12 @@ def cmd_fan(args):
                     if write(f"{p}_enable", PWM_ENABLE_MAP["custom"]) and write(p, val):
                         print(f"fan{idx} custom speed -> {pct}% (pwm {val})")
         else:  # reset
+            target = args.fan or "both"
             for p in pwms:
-                if write(f"{p}_enable", PWM_ENABLE_MAP["auto"]):
-                    print(f"fan{p[-1]} mode -> auto (firmware)")
+                idx = p[-1]
+                if (target in ("both", "cpu") and idx == "1") or (target in ("both", "gpu") and idx == "2"):
+                    if write(f"{p}_enable", PWM_ENABLE_MAP["auto"]):
+                        print(f"fan{idx} mode -> auto (firmware)")
         return
 
     # sweep: calibration helper, direct sysfs only (root)
@@ -270,15 +281,19 @@ def cmd_curve(args):
     fan = args.fan or "cpu"
     if args.action == "show":
         r = daemon_req({"op": "fan.curve.get"}, args.sock)
-        print(json.dumps(r, indent=2) if r is not None else None)
     elif args.action == "set":
         if not args.points or len(args.points.split()) < 2:
             sys.exit('points format: "<temp°>:<pct> …" e.g. "40:25 60:45 80:70 90:100"')
         r = daemon_req({"op": "fan.curve.set", "fan": fan, "points": args.points}, args.sock)
-        print(json.dumps(r, indent=2) if r is not None else None)
     elif args.action == "clear":
         r = daemon_req({"op": "fan.curve.clear", "fan": fan}, args.sock)
-        print(json.dumps(r, indent=2) if r is not None else None)
+    # consistent transport failure like every other subcommand (erratum E4:
+    # curve used to print "None" and exit 0 when the daemon was down)
+    if r is None:
+        sys.exit(2)
+    print(json.dumps(r, indent=2))
+    if r.get("error"):
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------- info
@@ -347,9 +362,9 @@ def cmd_kb(args):
                 if "error" in r:
                     sys.exit(f"error: {r['error']}")
                 eff = r.get("effect") or {}
-                if eff.get("running") and eff.get("effect"):
+                if (eff.get("running") or eff.get("engine") == "ec-native") and eff.get("effect"):
                     dir_label = "right" if eff.get("direction", 1) == 1 else "left"
-                    c = eff.get("color") or [0, 174, 199]
+                    c = eff.get("color") or eff.get("rgb") or [0, 174, 199]
                     c_hex = f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}"
                     print(f"Active effect: {eff.get('effect')} (speed: {eff.get('speed')}, brightness: {eff.get('brightness')}%, dir: {dir_label}, color: {c_hex})")
                 else:
@@ -513,6 +528,12 @@ def cmd_battmode(args):
     print(json.dumps(r, indent=2))
     if r.get("error"):
         sys.exit(1)
+    # committed:false means the EC did not take the mode (e.g. adaptive
+    # rejection); top-level status is forced 0 by the daemon, so surface the
+    # failure to scripts (daemon-protocol spec §7.2, erratum E4)
+    if r.get("committed") is False:
+        print("warning: EC did not commit the new mode", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_usbcharge(args):
@@ -551,6 +572,8 @@ def cmd_switchkey(args):
     sock = getattr(args, "sock", "/run/psense.sock")
     if args.action == "get":
         res = daemon_req({"op": "switchkey.get"}, sock=sock)
+        if res is None:
+            sys.exit(2)
         if "error" in res:
             sys.exit(f"error: {res['error']}")
         mode = res.get("mode", 0)
@@ -561,6 +584,8 @@ def cmd_switchkey(args):
             sys.exit("value required: cycle or turbo")
         mode = 0 if val.lower() in ("0", "cycle", "cycleswitch") else 1
         res = daemon_req({"op": "switchkey.set", "mode": mode}, sock=sock)
+        if res is None:
+            sys.exit(2)
         if res.get("status") != 0:
             sys.exit(f"error: {res.get('error', 'set failed')}")
         print(f"mode switch key -> {'cycle' if mode == 0 else 'turbo'}")

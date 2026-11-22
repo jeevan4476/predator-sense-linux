@@ -10,8 +10,8 @@
 # Acer (brand), acer, wmi/WSMI, hwmon, psensed, RGB, SMBIOS...
 addFilter("spelling-error")
 
-# Bundled GUI payload (upstream npm/electron tree, kept byte-faithful):
-# npm metadata dirs and upstream-marked ""-x files without shebangs
+# Bundled GUI payload (upstream Bun/Electron tree, kept byte-faithful):
+# package metadata dirs and upstream-marked ""-x files without shebangs
 addFilter("hidden-file-or-dir")
 addFilter("script-without-shebang")
 addFilter("symlink-to-binary-with-shebang")

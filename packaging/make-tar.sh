@@ -27,10 +27,10 @@ tar -C "$REPO" -cf - --exclude 'src/psense-electron/debug' --exclude '.git' \
         LICENSE README.md CONTRIBUTING.md spec assets setup.sh \
         src/psense-electron/app src/psense-electron/backend.js \
         src/psense-electron/main.js src/psense-electron/preload.js \
-        src/psense-electron/lighting-engine.js \
+        src/psense-electron/lighting-engine.js src/psense-electron/daemon-protocol.js \
         src/psense-electron/ddsc-table.json src/psense-electron/tls \
-        src/psense-electron/package.json src/psense-electron/package-lock.json \
-        src/psense-electron/bun.lock src/psense-electron/node_modules \
+        src/psense-electron/package.json src/psense-electron/bun.lock \
+        src/psense-electron/node_modules \
     | tar -xf - -C "$STAGE/predator-sense-$VER"
 tar -czf "$OUT/predator-sense-$VER.tar.gz" -C "$STAGE" "predator-sense-$VER"
 echo "dist/predator-sense-$VER.tar.gz  ($(du -h "$OUT/predator-sense-$VER.tar.gz" | cut -f1))"

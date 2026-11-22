@@ -155,7 +155,7 @@ class MainWindow(QMainWindow):
             run_op({"op": "info"}, self._after_info)
 
     def _after_info(self, d: dict) -> None:
-        if not d:
+        if not d or d.get("error"):
             QMessageBox.warning(
                 self, "psensed unreachable",
                 "psensed did not answer on /run/psense.sock.\n"

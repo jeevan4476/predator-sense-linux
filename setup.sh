@@ -65,8 +65,10 @@ remove_all() {
     rmmod "$MODULE_NAME" 2>/dev/null || true
     rm -f /etc/modules-load.d/psense-wmi.conf
     rm -f "$SYSTEMD_UNIT" /usr/bin/psense /usr/sbin/psensed \
+          /usr/bin/psense-purified-voice /usr/bin/psense-ai-charging \
           /usr/bin/predator-sense /usr/share/applications/predator-sense.desktop \
           /usr/share/icons/hicolor/256x256/apps/predator-sense.png
+    rm -rf /usr/lib/predator-sense /usr/share/predator-sense
     # legacy paths from pre-FHS installs
     rm -f /usr/local/bin/psense /usr/local/sbin/psensed /usr/local/bin/predator-sense
     systemctl daemon-reload
@@ -135,6 +137,18 @@ if [ "$DO_UNIT" -eq 1 ]; then
     echo "==> [3/5] installing CLI + daemon + systemd unit"
     install -Dm755 "$REPO/src/psense"  /usr/bin/psense
     install -Dm755 "$REPO/src/psensed" /usr/sbin/psensed
+    install -Dm644 "$REPO/src/psensed_lighting.py" /usr/lib/predator-sense/psensed_lighting.py
+    install -Dm644 "$REPO/src/psensed_gpu_oc.py"   /usr/lib/predator-sense/psensed_gpu_oc.py
+    if [ -f "$REPO/scripts/psense-purified-voice.sh" ]; then
+        install -Dm755 "$REPO/scripts/psense-purified-voice.sh" /usr/bin/psense-purified-voice
+    fi
+    if [ -f "$REPO/scripts/psense-ai-charging.py" ]; then
+        install -Dm755 "$REPO/scripts/psense-ai-charging.py" /usr/bin/psense-ai-charging
+    fi
+    if [ -d "$REPO/packaging/models" ]; then
+        install -d /usr/share/predator-sense/models
+        install -Dm644 "$REPO/packaging/models"/*.ini /usr/share/predator-sense/models/
+    fi
     install -Dm644 "$REPO/packaging/psensed.service" "$SYSTEMD_UNIT"
     systemctl daemon-reload
     systemctl enable --now psensed
@@ -149,9 +163,9 @@ install_gui() {
     [ "$was_active" = "active" ] && systemctl stop psensed || true
     rm -rf /opt/predator-sense
     mkdir -p /opt/predator-sense
-    for item in app backend.js main.js preload.js lighting-engine.js \
-                ddsc-table.json tls package.json package-lock.json bun.lock node_modules; do
-        cp -a "$REPO/src/psense-electron/$item" /opt/predator-sense/
+    for item in app backend.js main.js preload.js lighting-engine.js daemon-protocol.js \
+                ddsc-table.json tls package.json bun.lock node_modules; do
+        [ -e "$REPO/src/psense-electron/$item" ] && cp -a "$REPO/src/psense-electron/$item" /opt/predator-sense/
     done
     # single-user box: the app writes ~/.config state and (optionally) a debug/
     # dir next to itself for the PS_* capture harness — keep it user-owned.

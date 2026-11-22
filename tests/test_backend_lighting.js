@@ -25,6 +25,7 @@ const {
     applyLightingWrite,
     setDaemonCallOverride,
     lightingEngine,
+    HANDLERS,
     shutdown
 } = require("../src/psense-electron/backend");
 
@@ -66,8 +67,10 @@ async function runTests() {
             assert.strictEqual(daemonCalls[0].args.brightness, 80);
             assert.strictEqual(daemonCalls[0].args.direction, 2);
             assert.deepStrictEqual(daemonCalls[0].args.rgb, [0, 255, 204]);
-            assert.strictEqual(daemonCalls[0].args.zoneCount, 4);
+            // canonical name only (erratum E7): the daemon reads zone_count;
+            // the duplicate zoneCount key was removed
             assert.strictEqual(daemonCalls[0].args.zone_count, 4);
+            assert.strictEqual(daemonCalls[0].args.zoneCount, undefined);
             // Must NOT have written method 20 kb.set
             assert.ok(!daemonCalls.some(c => c.op === "kb.set"), `${eff} must not write method 20 kb.set`);
             console.log(`  ok ${eff} delegated to daemon kb.effect.set`);
@@ -193,6 +196,28 @@ async function runTests() {
         } finally {
             lightingEngine.stopEffect = origStopEffect;
         }
+    }
+
+    // Test 6: Returning to STATIC after animated effect re-writes kb.set (kbFrameSig invalidated)
+    {
+        daemonCalls.length = 0;
+        await applyLightingEntry({
+            effect: "STATIC",
+            speed: 0,
+            brightness: 100,
+            color: "#ff0000",
+            LEDs: [{ LED_id: 0, color: "#ff0000" }]
+        });
+        assert.ok(daemonCalls.some(c => c.op === "kb.set"), "STATIC after animated mode must re-write kb.set");
+        console.log("  ok STATIC re-writes kb.set after animated effect");
+    }
+
+    // Test 7: getSupportGPUInfo returns flat array of objects (not double-wrapped)
+    {
+        const gpuInfo = HANDLERS.pssdk.getSupportGPUInfo();
+        assert.ok(Array.isArray(gpuInfo) && gpuInfo.length === 1, "getSupportGPUInfo must return 1-element array");
+        assert.strictEqual(typeof gpuInfo[0].gpu_name, "string", "gpuInfo[0].gpu_name must be a string");
+        console.log("  ok getSupportGPUInfo returns flat [{ gpu_name }]");
     }
 
     console.log("\nAll backend lighting tests PASSED!");

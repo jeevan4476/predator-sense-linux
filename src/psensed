@@ -23,7 +23,7 @@ Ops (request = one JSON object + '\n', reply = one JSON object):
   kb.set      {mode, rgb, speed, brightness, dir, device}  16-byte frame (method 20)
   fan.wmode   {fan, mode}                     auto|turbo|custom (method 14)
   fan.wspeed  {pct, fan}                      custom % (methods 16+14)
-  fan.wget/get/fan.wmodes {fan}              register + mode reads (17/15)
+  fan.wget / fan.wmodes {fan}                 register + mode reads (17/15)
   fan.wtable                                  EC fan-table staging word (19)
   memory                                      SMBIOS type-17 scan (RAM freq/type)
   sysinfo                                     wsinfo snapshot (DMI/BIOS/OS/CPU/RAM/
@@ -55,6 +55,7 @@ import json
 import os
 import platform
 import queue
+import re
 import select
 import signal
 import socket
@@ -475,8 +476,10 @@ class Daemon:
         mode-0 frame — the EC's frame registers persist across daemon
         restarts, so an animation must never keep running over fresh zone
         colors."""
+        was_running = self.lighting_engine.running
         self.lighting_engine.stop_effect()
-        if not (force or self._ec_effect or self.lighting_engine.running):
+        self._last_lighting_zones = None
+        if not (force or self._ec_effect or was_running):
             return False
         frame = _kb_frame(0, 0, self._last_kb_bri, 0, (0, 0, 0))
         self.wmi.eval("gaming", 20, frame, 4)
@@ -501,15 +504,22 @@ class Daemon:
             eff_u = "SHIFTING"
         mode_id = KB_EC_EFFECTS.get(eff_u)
         if mode_id is not None:
+            self.lighting_engine.stop_effect()
+            self._last_lighting_zones = None
             frame = _kb_frame(mode_id, speed, brightness, direction, color)
             status, data = self.wmi.eval("gaming", 20, frame, 4)
             self._last_kb_bri = int(brightness) & 0xFF
-            self._ec_effect = {"engine": "ec-native", "effect": eff_u,
-                               "mode": mode_id, "speed": speed,
-                               "brightness": brightness,
+            self._ec_effect = {"engine": "ec-native", "running": True,
+                               "effect": eff_u, "mode": mode_id,
+                               "speed": speed, "brightness": brightness,
                                "direction": direction, "rgb": list(color)}
             return {"status": status, "ack": data.hex(),
                     "frame": frame.hex(), **self._ec_effect}
+        if eff_u not in ("BREATHING", "WAVE", "SHIFTING", "METEOR", "TWINKLING"):
+            return {"error": f"Unknown effect: {eff_u}"}
+        if self._ec_effect:
+            self._kb_ensure_static()
+        self._last_lighting_zones = None
         try:
             self.lighting_engine.start_effect(
                 eff_u, speed=speed, brightness=brightness,
@@ -611,8 +621,8 @@ class Daemon:
                 # continuously; every duplicate costs a 0.2-0.9 s SMM eval on
                 # the serialized worker and keeps the CPU/persona busy. Only
                 # zones whose direct zone color actually changes are written.
-                self._kb_ensure_static()   # retires engine + EC-native frame
-                self._ec_zone_colors.clear()   # stop may repaint zones
+                if self._kb_ensure_static():   # retires engine + EC-native frame
+                    self._ec_zone_colors.clear()   # stop may repaint zones
                 rgb = args.get("rgb", [0, 0, 0])
                 try:
                     r, g, b = (max(0, min(255, int(x))) for x in rgb)
@@ -623,8 +633,11 @@ class Daemon:
                     bits = (0x01, 0x02, 0x04, 0x08)
                 else:
                     try:
-                        nums = [int(z) for z in str(zones).replace(",", " ").split()]
-                    except ValueError:
+                        if isinstance(zones, (list, tuple)):
+                            nums = [int(z) for z in zones]
+                        else:
+                            nums = [int(z) for z in str(zones).replace(",", " ").split()]
+                    except (TypeError, ValueError):
                         return {"error": "zones: list of 1..4 or 'all'"}
                     if not nums or any(n not in (1, 2, 3, 4) for n in nums):
                         return {"error": "zones: list of 1..4 or 'all'"}
@@ -953,7 +966,9 @@ class Daemon:
             out["curves"] = {f"fan{k}": v["points"] for k, v in self.curves.items()}
             return out
         if name == "fan.reset":
-            return self._fan_write("mode", "auto", args.get("fan") or "both")
+            # fan selects which channel resets (/int spec §7.1 E1: previously
+            # passed positionally as pct and silently ignored)
+            return self._fan_write("mode", "auto", fan=args.get("fan") or "both")
         if name == "fan.mode" or name == "fan.speed":
             return self._fan_write(name.split('.')[1], **args)
         return {"error": f"unknown op {name!r}"}
@@ -1436,9 +1451,12 @@ class Daemon:
             return {"curves": {f"fan{k}": v["points"] for k, v in self.curves.items()}}
 
         if name == "fan.curve.clear":
-            idx = {"cpu": 1, "gpu": 2}.get(args.get("fan"))
+            fan_arg = args.get("fan")
+            idx = {"cpu": 1, "gpu": 2}.get(fan_arg)
+            if idx is None:
+                return {"error": "fan must be cpu|gpu"}
             if idx not in self.curves:
-                return {"error": f"no curve for fan {idx}"}
+                return {"error": f"no curve for fan {fan_arg}"}
             del self.curves[idx]
             out = self._fan_write("mode", "auto", fan="cpu" if idx == 1 else "gpu")
             return {"cleared": f"fan{idx}", **out}
@@ -1505,8 +1523,6 @@ class Daemon:
             return self.op_profile(name, {k: v for k, v in req.items() if k != "op"})
         if name == "memory":
             return self.op_memory()
-        if name == "sysinfo":
-            return self.op_sysinfo()
         if name == "health":
             return self.op_health()
         if name.startswith("fan.curve"):

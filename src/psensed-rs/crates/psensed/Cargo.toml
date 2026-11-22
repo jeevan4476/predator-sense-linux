@@ -1,0 +1,12 @@
+[package]
+name = "psensed"
+description = "predator-sense root daemon (binary port of src/psensed)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+psense-protocol = { path = "../psense-protocol" }
+psense-engine = { path = "../psense-engine" }
+psense-gpu-oc = { path = "../psense-gpu-oc" }
+psensed-core = { path = "../psensed-core" }

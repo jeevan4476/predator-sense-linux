@@ -113,7 +113,7 @@ Predator Sense Linux follows a strict Unix separation-of-concerns model:
 │                 ▼                                 ▼                    │
 │   ┌────────────────────────────────────────────────────────────────┐   │
 │   │                     `psensed` Root Daemon                      │   │
-│   │   - Manages serialized WMI dispatch queue (≥250ms spacing)     │   │
+│   │   - Manages serialized WMI dispatch queue (≥200ms spacing)     │   │
 │   │   - Userspace fan temperature curve loop with hysteresis       │   │
 │   │   - Local state cache, SMBIOS reader, & battery limiter        │   │
 │   └─────────────────────────────┬──────────────────────────────────┘   │
@@ -152,7 +152,7 @@ Interacting directly with firmware (ACPI WMI, IO ports, and the Embedded Control
 1. **Root Daemon (`psensed`)**: Runs as a minimal background `systemd` system service. It owns the character device `/dev/psense-wmi` and the control socket `/run/psense.sock`.
 2. **Standard Group Permissions**: `/run/psense.sock` is created with permissions `0660` owned by `root:wheel`. Any user belonging to the `wheel` (or configured administrative) group can monitor sensors, change thermal profiles, tune fans, and control lighting without `sudo`.
 3. **Allow-Listed WMI Dispatch**: The `psense-wmi` kernel driver enforces a strict in-kernel allow-list for WMI GUIDs (`AcerGamingFunction`, `BatteryControl`) and valid method IDs. Arbitrary EC writes are blocked at the driver boundary.
-4. **Hardware Pacing Guard**: Acer's firmware SMM defers overlapping WMI calls, causing multi-second desktop lockups if queried concurrently. `psensed` enforces a single-threaded queue with a minimum 250 ms gap between evaluations, ensuring 100% stable operations.
+4. **Hardware Pacing Guard**: Acer's firmware SMM defers overlapping WMI calls, causing multi-second desktop lockups if queried concurrently. `psensed` enforces a single-threaded queue with a minimum 200 ms gap between evaluations (500 ms across GUID families), ensuring 100% stable operations.
 
 ---
 
@@ -228,7 +228,7 @@ sudo install -m 0644 packaging/psensed.service /etc/systemd/system/psensed.servi
 sudo systemctl daemon-reload && sudo systemctl enable --now psensed
 
 # 3. Build & link the GUI bundle
-cd src/psense-electron && npm install --omit=dev
+cd src/psense-electron && bun install --production
 sudo mkdir -p /opt/predator-sense
 sudo cp -r . /opt/predator-sense/
 sudo install -m 0755 ../../packaging/predator-sense /usr/local/bin/predator-sense
@@ -263,6 +263,7 @@ psense fan mode max                   # Set fans to 100% maximum RPM
 psense fan mode custom --fan cpu      # Enable custom control for CPU fan
 psense fan speed 65 --fan both        # Set CPU & GPU fan duty cycle to 65%
 psense fan reset                      # Restore default firmware fan controls
+psense fan reset --fan cpu            # Restore only the CPU fan (both by default)
 
 # Custom Userspace Fan Curves (Temperature °C -> Speed %)
 psense curve show                     # Display active temperature curve points
@@ -271,9 +272,9 @@ psense curve clear                    # Revert to automatic curve
 
 # RGB Backlight & Lighting Presets
 psense kb get                         # Display current keyboard lighting state
-psense kb set static 100 --rgb 0,180,255     # Set all zones to bright cyan
-psense kb zone 1 100 --rgb 255,0,0           # Set Zone 1 (WASD) to red
-psense kb zone 2 100 --rgb 0,255,100         # Set Zone 2 to emerald green
+psense kb set static --brightness 200 --rgb 0,180,255   # All zones bright cyan (brightness is 0..255 for set)
+psense kb zone --zones 1 --rgb 255,0,0                  # Zone 1 (WASD) red (drops --rgb to 0,0,0 to turn off a zone)
+psense kb effect wave --speed 4 --color 00ffcc          # Animated software wave (brightness here is 0..100, via --brightness)
 
 # Battery Longevity & Charging Modes
 psense battmode get                   # Query current battery health charging state
@@ -287,6 +288,29 @@ psense usbcharge set on 20            # Keep USB ports powered while off until b
 # Launch Desktop GUI Detached
 psense ui
 ```
+
+### Automation contract (`checkup --json`)
+
+For scripts and monitoring, `psense checkup --json` prints a stable JSON envelope:
+
+| Key       | Shape  | Contents                                                                                        |
+| --------- | ------ | ----------------------------------------------------------------------------------------------- |
+| `system`  | object | `product_name`, `bios_version`, `kernel`, `os`                                                   |
+| `battery` | object | `capacity`, `design_capacity`, `full_capacity`, `cycle_count`, `wear_level_pct`, `health_pct`, `status` |
+| `storage` | list   | per drive: `drive`, `device`, `model`, `smart_health`, `temperature_c`, `critical_warnings`     |
+| `ram`     | object | `total_gb`, `available_gb`, `used_gb`, `usage_pct`, kB-level fields, `type`, `frequency_mhz`    |
+
+The contract is pinned by `tests/test_checkup_json.py` on CI:
+
+- Exit code `0` even when the daemon socket is unreachable; daemon-fed
+  fields degrade to defaults instead of failing the command.
+- Top-level keys are fixed. New fields may appear inside a section, but
+  existing keys are never renamed or removed.
+
+The same transport discipline now applies to the control ops: exit `2`
+when the daemon is unreachable, `1` on a daemon-reported error (`fan curve`,
+`switchkey get` and `battmode set` have been aligned; `battmode set` also
+exits `1` with a warning when the EC reports `committed: false`).
 
 ---
 

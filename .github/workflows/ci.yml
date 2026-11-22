@@ -6,7 +6,7 @@ on:
 
 jobs:
   tests:
-    # Run the daemon/CLI/GPU-OC python tests and the backend node tests.
+    # Run the daemon/CLI/GPU-OC python tests and the backend bun tests.
     # Source-only CI: no RPM build here — the packaged payload needs
     # src/psense-electron/app/, which is deliberately not in the repo
     # (see README §Source-only distribution policy).
@@ -16,23 +16,65 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: "20"
-      - name: python tests (daemon, cli lighting, gpu-oc)
+          bun-version: "1.4.2"
+      - name: enforce bun-only lockfiles
+        run: |
+          if find . -not -path './.git/*' -not -path '*/node_modules/*' \( -name 'package-lock.json' -o -name 'yarn.lock' -o -name 'pnpm-lock.yaml' \) | grep -q .; then
+            echo "Error: Only bun.lock is allowed. Remove npm/yarn/pnpm lockfiles." >&2
+            exit 1
+          fi
+      - name: bun install (electron shim devDeps for TS toolchain)
+        working-directory: src/psense-electron
+        run: bun install --frozen-lockfile
+      - name: typecheck electron shims (TS strict, B-lite emit model)
+        working-directory: src/psense-electron
+        run: bun run typecheck
+      - name: build electron shims (emit B-lite js twins)
+        working-directory: src/psense-electron
+        run: bun run build
+      - name: python tests (daemon, cli lighting, gpu-oc, hardening, checkup)
         run: |
           python3 -m unittest tests.test_cli_lighting \
                               tests.test_lighting_engine \
-                              tests.test_gpu_oc
-      - name: syntax-check electron shims
+                              tests.test_gpu_oc \
+                              tests.test_hardening \
+                              tests.test_checkup_json
+      - name: syntax-check electron shims (bun)
         run: |
-          node --check src/psense-electron/backend.js
-          node --check src/psense-electron/main.js
-          node --check src/psense-electron/lighting-engine.js
+          bun -e '
+            const transpiler = new Bun.Transpiler({ loader: "js" });
+            for (const file of process.argv.slice(1)) {
+              transpiler.scan(await Bun.file(file).text());
+            }
+          ' \
+            src/psense-electron/backend.js \
+            src/psense-electron/main.js \
+            src/psense-electron/lighting-engine.js \
+            src/psense-electron/preload.js \
+            src/psense-electron/daemon-protocol.js
       - name: syntax-check installer scripts
         run: |
           bash -n setup.sh
           bash -n packaging/install.sh
           bash -n src/psense-wmi/install-dkms.sh
-      - name: backend(node) tests
-        run: node --test tests/test_backend_lighting.js
+      - name: backend(bun) tests
+        run: |
+          bun ./tests/test_backend_lighting.js
+          bun test ./tests/test_lighting_engine.js ./tests/test_daemon_protocol.js
+  rust:
+    # psensed-rs workspace: byte-contract tests + strict lint gate. Separate
+    # job so a toolchain hiccup never blocks the python/node lanes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: cargo test (byte-locked frame + effect table parity)
+        working-directory: src/psensed-rs
+        run: cargo test --workspace
+      - name: cargo clippy (-D warnings)
+        working-directory: src/psensed-rs
+        run: cargo clippy --workspace -- -D warnings

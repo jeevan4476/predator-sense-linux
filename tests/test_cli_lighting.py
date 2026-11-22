@@ -189,6 +189,29 @@ class TestCliLighting(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.run_cli(["kb", "effect", "nonexistent_effect"])
 
+    def test_effect_status_ec_native(self):
+        def ec_native_req(op, sock="/run/psense.sock", timeout=5, silent=False):
+            if op.get("op") == "kb.effect.get":
+                return {
+                    "status": 0,
+                    "effect": {
+                        "engine": "ec-native",
+                        "effect": "BREATHING",
+                        "mode": 1,
+                        "speed": 4,
+                        "brightness": 80,
+                        "direction": 2,
+                        "rgb": [255, 0, 128],
+                    },
+                }
+            return {"status": 0}
+
+        self.mock_daemon_req.side_effect = ec_native_req
+        out, _ = self.run_cli(["kb", "effect", "status"])
+        self.assertIn("Active effect: BREATHING", out)
+        self.assertIn("dir: left", out)
+        self.assertIn("#ff0080", out)
+
 
 if __name__ == "__main__":
     unittest.main()

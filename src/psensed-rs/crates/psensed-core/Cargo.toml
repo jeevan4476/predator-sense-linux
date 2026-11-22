@@ -1,0 +1,11 @@
+[package]
+name = "psensed-core"
+description = "psensed core: SMM eval queue, spacing policy, EC frame wiring, KV stores"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+psense-protocol = { path = "../psense-protocol" }
+psense-engine = { path = "../psense-engine" }
+psense-gpu-oc = { path = "../psense-gpu-oc" }
