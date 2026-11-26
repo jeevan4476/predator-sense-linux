@@ -235,13 +235,16 @@ class LightingEngine {
     }
 
     _startScreenSampler(sessionId: number, zoneCount: number = 4): void {
+        let sampling = false;
         const sampleOnce = () => {
-            if (!this.running || sessionId !== this.activeSessionId) return;
+            if (sampling || !this.running || sessionId !== this.activeSessionId) return;
+            sampling = true;
             try {
+                const display = process.env.DISPLAY || ":0.0";
                 const proc = spawn("ffmpeg", [
                     "-loglevel", "quiet",
                     "-f", "x11grab",
-                    "-i", ":0.0",
+                    "-i", display,
                     "-vf", `scale=${zoneCount}:1`,
                     "-vframes", "1",
                     "-f", "rawvideo",
@@ -249,11 +252,18 @@ class LightingEngine {
                     "-"
                 ], { stdio: ["ignore", "pipe", "ignore"] });
 
-                if (!proc.stdout) return;
+                proc.on("error", () => {
+                    sampling = false;
+                });
+                if (!proc.stdout) {
+                    sampling = false;
+                    return;
+                }
                 const chunks: Buffer[] = [];
                 proc.stdout.on("data", (d: Buffer) => chunks.push(d));
                 proc.on("close", (code: number | null) => {
-                    if (code === 0) {
+                    sampling = false;
+                    if (code === 0 && this.running && sessionId === this.activeSessionId) {
                         const buf = Buffer.concat(chunks);
                         if (buf.length >= zoneCount * 3) {
                             const sampled: number[][] = [];
@@ -264,7 +274,9 @@ class LightingEngine {
                         }
                     }
                 });
-            } catch { }
+            } catch {
+                sampling = false;
+            }
         };
 
         sampleOnce();

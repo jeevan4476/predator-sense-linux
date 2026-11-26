@@ -45,11 +45,13 @@ const APP_ROOT = path.join(__dirname, "app", "dist", "widgets", "main");
 function handlePssRequest(request) {
     const u = new URL(request.url);
     let p = decodeURIComponent(u.pathname).replace(/^\/+/, "");
-    const file = path.join(APP_ROOT, p);
-    if (!file.startsWith(APP_ROOT)) return new Response("", { status: 403 });
+    const root = path.resolve(APP_ROOT);
+    const file = path.resolve(root, p);
+    if (file !== root && !file.startsWith(root + path.sep)) return new Response("", { status: 403 });
     if (fs.existsSync(file) && fs.statSync(file).isDirectory())
         p = path.join(p, "index.html");
-    const target = path.join(APP_ROOT, p);
+    const target = path.resolve(root, p);
+    if (target !== root && !target.startsWith(root + path.sep)) return new Response("", { status: 403 });
     if (!fs.existsSync(target)) return new Response("", { status: 404 });
     return net.fetch("file://" + target);
 }
@@ -180,9 +182,9 @@ function checkBatteryResult(hres) {
         BatteryCycleCount: b.battery_cycle_count ?? 0 };
 }
 
-async function startAgentWebservers() {
+function startAgentWebservers() {
     let WS;
-    try { WS = require("ws"); } catch { return; }
+    try { WS = require("ws"); } catch { return []; }
     const crypto = require("crypto");
     const KEYA = Buffer.from("A6052DC8A6E44210", "utf8");
     const KEYB = Buffer.from("AB252AB73BED1CDB", "utf8");
@@ -312,8 +314,8 @@ async function startAgentWebservers() {
                                     // protocol manual (§13.25); honest filler:
                                     // SMBIOS totals, no runtime diagnostic ran
                                     ok("CheckMemory", {
-                                        TotalMemoryMB: si.ram?.total_mb ?? 0,
-                                        NumberOfBanks: si.ram?.banks ?? 0,
+                                        TotalMemoryMB: si?.ram?.total_mb ?? 0,
+                                        NumberOfBanks: si?.ram?.banks ?? 0,
                                         TestInProgress: false,
                                         HealthStatus: -1,
                                     });
@@ -947,9 +949,12 @@ function createWindow() {
         mainWin.webContents.openDevTools({ mode: "detach" });
     }
     const wc = mainWin.webContents;
-    wc.on("console-message", (ev, level, msg, line, srcId) => {
-        const tag = ["", "info", "warn", "error"][level] || "?";
-        console.log(`[renderer.${tag}] ${(srcId.split("/").pop() || "")}:${line || ""} ${msg}`);
+    wc.on("console-message", (ev) => {
+        const tag = typeof ev.level === "string"
+            ? ev.level
+            : (["", "info", "warn", "error"][ev.level] || "?");
+        const src = String(ev.sourceId || "").split("/").pop() || "";
+        console.log(`[renderer.${tag}] ${src}:${ev.lineNumber || ""} ${ev.message ?? ""}`);
     });
     wc.on("did-fail-load", (_e, code, desc, url) =>
         console.error(`[load-failed] ${code} ${desc} ${url}`));
@@ -1058,7 +1063,7 @@ function createWindow() {
             } catch (e) { console.log("[click] census failed:", e.message); }
             for (const [x, y, dwell] of clicks) {
                 // resolve the point into a webview guest (see block comment)
-                let target = wc, cx = x, cy = y;
+                let target = wc, cx = x, cy = y, hitId = null;
                 try {
                     const info = await wc.executeJavaScript(`(function(){
                         const out = [];
@@ -1074,7 +1079,7 @@ function createWindow() {
                     if (process.env.PS_TRACE) console.log("[click] embed rects:", info);
                     if (hit && hit.id) {
                         const guest = require("electron").webContents.fromId(hit.id);
-                        if (guest) { target = guest; cx = x - hit.x; cy = y - hit.y; }
+                        if (guest) { target = guest; cx = x - hit.x; cy = y - hit.y; hitId = hit.id; }
                     }
                 } catch { /* host fallback */ }
                 if (process.env.PS_TRACE) try {
@@ -1091,7 +1096,7 @@ function createWindow() {
                 await new Promise((r) => setTimeout(r, 120));
                 target.sendInputEvent({ type: "mouseDown", x: cx, y: cy, button: "left", clickCount: 1 });
                 target.sendInputEvent({ type: "mouseUp", x: cx, y: cy, button: "left", clickCount: 1 });
-                console.log(`[click] ${x},${y}${target === wc ? " (host)" : ` (webview ${hit.id}, local ${cx},${cy})`}`);
+                console.log(`[click] ${x},${y}${target === wc ? " (host)" : ` (webview ${hitId}, local ${cx},${cy})`}`);
                 if (process.env.PS_CLICK_SYNTH) try {
                     const r = await wc.executeJavaScript(`(function(){
                         const e = document.elementFromPoint(${cx}, ${cy});
@@ -1180,18 +1185,18 @@ function createTray() {
                 {
                     label: "Mode: Performance",
                     type: "radio",
-                    checked: currentProfile === "performance",
+                    checked: currentProfile === "balanced-performance",
                     click: async () => {
-                        await backend.daemonCall("profile.set", { name: "performance" });
+                        await backend.daemonCall("profile.set", { name: "balanced-performance" });
                         updateTrayMenu();
                     }
                 },
                 {
                     label: "Mode: Turbo",
                     type: "radio",
-                    checked: currentProfile === "turbo",
+                    checked: currentProfile === "performance",
                     click: async () => {
-                        await backend.daemonCall("profile.set", { name: "turbo" });
+                        await backend.daemonCall("profile.set", { name: "performance" });
                         updateTrayMenu();
                     }
                 },

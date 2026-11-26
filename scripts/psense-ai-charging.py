@@ -31,7 +31,12 @@ def daemon_call(op, args=None, timeout=5.0):
         if args:
             req.update(args)
         s.sendall((json.dumps(req) + "\n").encode())
-        res = s.recv(4096)
+        res = b""
+        while not res.endswith(b"\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            res += chunk
         s.close()
         return json.loads(res.decode())
     except Exception as e:
@@ -82,9 +87,10 @@ def get_battery_info():
             # check AC / Mains
             online_f = os.path.join(p, "online")
             type_f = os.path.join(p, "type")
-            if os.path.exists(online_f):
+            if os.path.exists(online_f) and os.path.exists(type_f):
                 try:
-                    ac_online = int(open(online_f).read().strip()) == 1
+                    if open(type_f).read().strip() == "Mains":
+                        ac_online = int(open(online_f).read().strip()) == 1
                 except Exception:
                     pass
             # check Battery capacity

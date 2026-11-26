@@ -25,6 +25,7 @@ const {
     applyLightingWrite,
     setDaemonCallOverride,
     lightingEngine,
+    HANDLERS,
     shutdown
 } = require("../src/psense-electron/backend");
 
@@ -195,6 +196,28 @@ async function runTests() {
         } finally {
             lightingEngine.stopEffect = origStopEffect;
         }
+    }
+
+    // Test 6: Returning to STATIC after animated effect re-writes kb.set (kbFrameSig invalidated)
+    {
+        daemonCalls.length = 0;
+        await applyLightingEntry({
+            effect: "STATIC",
+            speed: 0,
+            brightness: 100,
+            color: "#ff0000",
+            LEDs: [{ LED_id: 0, color: "#ff0000" }]
+        });
+        assert.ok(daemonCalls.some(c => c.op === "kb.set"), "STATIC after animated mode must re-write kb.set");
+        console.log("  ok STATIC re-writes kb.set after animated effect");
+    }
+
+    // Test 7: getSupportGPUInfo returns flat array of objects (not double-wrapped)
+    {
+        const gpuInfo = HANDLERS.pssdk.getSupportGPUInfo();
+        assert.ok(Array.isArray(gpuInfo) && gpuInfo.length === 1, "getSupportGPUInfo must return 1-element array");
+        assert.strictEqual(typeof gpuInfo[0].gpu_name, "string", "gpuInfo[0].gpu_name must be a string");
+        console.log("  ok getSupportGPUInfo returns flat [{ gpu_name }]");
     }
 
     console.log("\nAll backend lighting tests PASSED!");
