@@ -24,7 +24,7 @@
 
 Name:           predator-sense
 Version:        5.0.1463
-Release:        9%{?dist}
+Release:        10%{?dist}
 Summary:        Acer Predator control for Linux (daemon, CLI, exact-clone GUI)
 
 License:        GPL-2.0-or-later
@@ -206,6 +206,23 @@ modprobe psense-wmi 2>/dev/null || :
 depmod -a -F /boot/System.map-%{kver} %{kver} || :
 
 %changelog
+* Thu Nov 26 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-10
+- psensed: fix kb.zone.set EC palette deduplication, dynamic-to-static lighting
+  transitions, JSON list zone payloads, fan.reset --fan handling, and systemd
+  service sandboxing (spec/protocol.md)
+- psense: add checkup --json automation contract, consistent exit codes,
+  EC-native effect reporting in kb effect status, direct-sysfs fan fixes, and
+  --sock forwarding across fan subcommands
+- psense-electron: migrate lighting-engine, preload, and daemon-protocol to
+  strict TypeScript twins; fix tray thermal profile mappings, shutdown HTTP
+  cleanup, GPU info payload, EOF socket resolution, and ffmpeg guards; wire
+  PurifiedVoice/Camera hooks to nv-broadcast when installed
+- psensed-rs: add Rust workspace scaffold and byte-locked EC keyboard frame
+  contract tests
+- psense-wmi & packaging: harden pswmi_lock around ioctl device reads/evals,
+  install missing daemon modules/model profiles/helper scripts in setup.sh and
+  RPM spec, and enforce Bun exclusively across JS tooling, CI, and packaging
+
 * Mon Oct 19 2026 jeevan4476 <jeevan4476@users.noreply.github.com> - 5.0.1463-9
 - psensed: BREATHING/SHIFTING/METEOR/TWINKLING (and NEON→SHIFTING alias) are
   now EC-native: one 16-B controller-layout frame per change, the EC animates
