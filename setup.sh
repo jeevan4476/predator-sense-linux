@@ -164,7 +164,7 @@ install_gui() {
     rm -rf /opt/predator-sense
     mkdir -p /opt/predator-sense
     for item in app backend.js main.js preload.js lighting-engine.js daemon-protocol.js \
-                ddsc-table.json tls package.json package-lock.json bun.lock node_modules; do
+                ddsc-table.json tls package.json bun.lock node_modules; do
         [ -e "$REPO/src/psense-electron/$item" ] && cp -a "$REPO/src/psense-electron/$item" /opt/predator-sense/
     done
     # single-user box: the app writes ~/.config state and (optionally) a debug/

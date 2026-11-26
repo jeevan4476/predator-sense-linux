@@ -136,10 +136,10 @@ install -Dm644 src/psense-wmi/psense-wmi.ko \
 # ---------- GUI payload (bundled Electron + renderer) ----------
 mkdir -p %{buildroot}%{appdir}
 for item in app backend.js main.js preload.js lighting-engine.js daemon-protocol.js ddsc-table.json tls \
-            package.json package-lock.json bun.lock node_modules; do
+            package.json bun.lock node_modules; do
     cp -a src/psense-electron/$item %{buildroot}%{appdir}/
 done
-# upstream npm/undici trees hold byte-identical copies; dedupe to real
+# upstream package/undici trees hold byte-identical copies; dedupe to real
 # hardlinks so the payload ships without duplicated content
 hardlink -c %{buildroot}%{appdir} 2>/dev/null
 cat > %{buildroot}%{_bindir}/predator-sense <<'LAUNCH'
