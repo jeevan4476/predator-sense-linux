@@ -9,12 +9,12 @@ backend: window.ddsc.* calls go to the local root daemon `psensed`
 
 ```bash
 cd ~/projects/predator-sense-linux/src/psense-electron
-npm install electron      # one-time (Electron runtime, ~250 MB)
-npx electron .            # launch
+bun install               # one-time (Electron runtime, ~250 MB)
+bun run start             # launch
 ```
 
 Debug console of dispatched-but-unimplemented functions:
-`PS_DEVTOOLS=1 npx electron .` (devtools; every unknown `ddsc.<module>.<func>`
+`PS_DEVTOOLS=1 bun run start` (devtools; every unknown `ddsc.<module>.<func>`
 prints `[backend] unhandled func ...` to the terminal → tells us what to map next).
 
 ## Files

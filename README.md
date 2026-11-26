@@ -228,7 +228,7 @@ sudo install -m 0644 packaging/psensed.service /etc/systemd/system/psensed.servi
 sudo systemctl daemon-reload && sudo systemctl enable --now psensed
 
 # 3. Build & link the GUI bundle
-cd src/psense-electron && npm install --omit=dev
+cd src/psense-electron && bun install --production
 sudo mkdir -p /opt/predator-sense
 sudo cp -r . /opt/predator-sense/
 sudo install -m 0755 ../../packaging/predator-sense /usr/local/bin/predator-sense

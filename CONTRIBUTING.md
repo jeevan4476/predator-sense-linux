@@ -41,21 +41,24 @@ To build and run all components from source, install the following packages for 
 ### Fedora / RHEL
 ```bash
 sudo dnf install -y git gcc make dkms kernel-devel \
-    nodejs npm python3 python3-devel rpm-build rpmlint \
+    python3 python3-devel rpm-build rpmlint \
     smartmontools acpica-tools
+curl -fsSL https://bun.sh/install | bash
 ```
 
 ### Ubuntu / Debian
 ```bash
 sudo apt install -y git gcc make dkms linux-headers-$(uname -r) \
-    nodejs npm python3 python3-dev \
+    python3 python3-dev \
     smartmontools acpidump iasl
+curl -fsSL https://bun.sh/install | bash
 ```
 
 ### Arch Linux
 ```bash
 sudo pacman -S --needed git gcc make dkms linux-headers \
-    nodejs npm python smartmontools acpica
+    python smartmontools acpica
+curl -fsSL https://bun.sh/install | bash
 ```
 
 ---
@@ -93,11 +96,11 @@ python3 src/psense info
 ```bash
 cd src/psense-electron
 
-# Install dependencies
-npm install
+# Install dependencies (Bun only)
+bun install
 
 # Launch with developer tools enabled
-PS_DEVTOOLS=1 npm start
+PS_DEVTOOLS=1 bun run start
 ```
 
 ### 4. Packaging & Building RPMs
@@ -188,6 +191,7 @@ If your laptop model requires custom handling:
 - Ensure all commands handle daemon disconnection gracefully.
 
 ### JavaScript / Electron (`psense-electron`)
+- **Use Bun exclusively**: run `bun install`, `bun run`, `bun test`, and `bunx`. Never use `npm`, `npx`, `yarn`, or `pnpm`, and never commit `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml`.
 - Keep business logic cleanly divided between `main.js` (IPC, window lifecycle, tray, overlay) and `backend.js` (service shim, socket client, scenario store).
 - Respect the offline security policy; never disable certificate verification for remote origins.
 - Pulsar dynamic lighting effects belong in `lighting-engine.js` with smooth HSV/RGB interpolation and hardware-safe rate limiting.
@@ -218,6 +222,6 @@ If your laptop model requires custom handling:
    - `docs(readme): update arch linux installation guide`
 4. **Test Before Submitting**:
    - Run `python3 src/psense checkup`.
-   - Run `node -c src/psense-electron/main.js` and `backend.js`.
+   - Run `cd src/psense-electron && bun run typecheck && bun run test`.
    - If modifying packaging, run `make-tar.sh` and `rpmlint`.
 5. **Open a Pull Request**: Provide a clear summary of changes, test results, and specify the laptop model tested.

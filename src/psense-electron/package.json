@@ -5,11 +5,20 @@
   "main": "main.js",
   "channel": "LinuxShim",
   "private": true,
+  "packageManager": "bun@1.4.2",
+  "engines": {
+    "bun": ">=1.0.0",
+    "npm": "please-use-bun",
+    "yarn": "please-use-bun",
+    "pnpm": "please-use-bun"
+  },
   "scripts": {
+    "preinstall": "case \"${npm_config_user_agent:-}\" in bun/*) ;; *) echo 'Error: This project enforces Bun. Use `bun install` instead of npm/yarn/pnpm.' >&2; exit 1 ;; esac",
     "start": "electron .",
     "typecheck": "tsc -p . --noEmit",
     "build": "tsc -p .",
-    "generate:ddsc": "node generate-ddsc-dts.mjs"
+    "test": "bun ../../tests/test_backend_lighting.js && bun test ../../tests/test_lighting_engine.js ../../tests/test_daemon_protocol.js",
+    "generate:ddsc": "bun generate-ddsc-dts.mjs"
   },
   "dependencies": {
     "@electron/remote": "^2.1.3",
