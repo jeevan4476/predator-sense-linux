@@ -125,5 +125,20 @@ class TestBattmodeCommittedContract(unittest.TestCase):
         self.assertIn("warning: EC did not commit the new mode", src)
 
 
+class TestCliDaemonDownGuards(unittest.TestCase):
+    """Ensure CLI exits cleanly (code 2) when daemon is unreachable."""
+
+    def test_switchkey_set_daemon_down_exits_2(self):
+        import subprocess
+        cli = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "psense"))
+        p = subprocess.run(
+            [sys.executable, cli, "switchkey", "set", "cycle",
+             "--sock", "/tmp/psense-nonexistent-hardening-test.sock"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(p.returncode, 2, f"stderr: {p.stderr}")
+        self.assertNotIn("Traceback", p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

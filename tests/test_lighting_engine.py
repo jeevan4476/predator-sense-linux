@@ -183,11 +183,24 @@ class TestPsensedIntegration(unittest.TestCase):
             self.assertFalse(daemon.lighting_engine.get_status()["running"])
             self.assertEqual(len(res_zone["applied"]), 4)
 
+            # Repeated identical kb.zone.set must dedupe (zero WMI calls)
+            calls_before_dup = len(daemon.wmi.calls)
+            res_dup = daemon.op_wmi("kb.zone.set", {"rgb": [255, 0, 0], "zones": "all"})
+            self.assertEqual(res_dup.get("skipped"), "palette unchanged")
+            self.assertEqual(res_dup["applied"], [])
+            self.assertEqual(len(daemon.wmi.calls), calls_before_dup)
+
+            # kb.zone.set accepts JSON list [1, 3] for zones
+            res_list = daemon.op_wmi("kb.zone.set", {"rgb": [0, 255, 0], "zones": [1, 3]})
+            self.assertNotIn("error", res_list)
+            self.assertEqual([a["zone_bit"] for a in res_list["applied"]], [1, 4])
+
             # EC-native effects: BREATHING becomes ONE 16-B frame (method 20)
             # that the EC renders autonomously — no engine thread, zero CPU.
             res_ec = daemon.op_wmi("kb.effect.set", {"effect": "BREATHING", "speed": 3, "color": [0, 200, 255]})
             self.assertEqual(res_ec["status"], 0)
             self.assertEqual(res_ec["effect"]["engine"], "ec-native")
+            self.assertTrue(res_ec["effect"]["running"])
             self.assertEqual(res_ec["effect"]["effect"], "BREATHING")
             self.assertFalse(daemon.lighting_engine.get_status()["running"])
             self.assertEqual(daemon._ec_effect["mode"], 1)
@@ -199,6 +212,23 @@ class TestPsensedIntegration(unittest.TestCase):
             self.assertEqual(frame[3], 2)   # direction 1 → +1
             self.assertEqual(tuple(frame[4:7]), (0, 200, 255))
             self.assertEqual(frame[8], 0x03)
+
+            # Switching EC-native -> software WAVE retires _ec_effect with mode-0 frame
+            calls_before_wave = len(daemon.wmi.calls)
+            res_sw = daemon.op_wmi("kb.effect.set", {"effect": "WAVE", "speed": 3})
+            self.assertEqual(res_sw["status"], 0)
+            self.assertIsNone(daemon._ec_effect)
+            self.assertTrue(daemon.lighting_engine.get_status()["running"])
+            self.assertEqual(daemon.op_wmi("kb.effect.get", {})["effect"]["effect"], "WAVE")
+            # Mode-0 static write preceded WAVE start
+            mode0_writes = [c for c in daemon.wmi.calls[calls_before_wave:] if c[1] == 20 and c[2][0] == 0]
+            self.assertGreaterEqual(len(mode0_writes), 1)
+
+            # Switching software WAVE -> EC-native BREATHING stops software engine
+            res_ec2 = daemon.op_wmi("kb.effect.set", {"effect": "BREATHING", "speed": 3, "color": [0, 200, 255]})
+            self.assertEqual(res_ec2["status"], 0)
+            self.assertFalse(daemon.lighting_engine.get_status()["running"])
+            self.assertEqual(daemon._ec_effect["mode"], 1)
 
             # kb.restore replays the saved EC-native effect as a frame write
             daemon._ec_effect = None

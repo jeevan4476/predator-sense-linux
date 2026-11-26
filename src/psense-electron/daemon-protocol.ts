@@ -79,11 +79,11 @@ export interface BattmodeSetReply {
 }
 export interface UsbchargeGetReply { status: number; raw?: string; [key: string]: unknown; }
 export interface MemoryReply {
-    dimms: unknown;
+    dimms: number;
     total_mb: number;
-    type: string;
-    frequency: string;
-    speed_max: unknown;
+    type: string | null;
+    frequency: number;
+    speed_max: number;
     [key: string]: unknown;
 }
 export interface HealthReply {
@@ -132,6 +132,13 @@ export function createDaemonCallOnce(socketPath: string = DEFAULT_DAEMON_SOCKET)
     return (op, args, timeout = 6000) => new Promise((resolve) => {
         const s = netCreateConnection(socketPath);
         let buf = "";
+        let settled = false;
+        const done = (v: DaemonReply | null) => {
+            if (!settled) {
+                settled = true;
+                resolve(v);
+            }
+        };
         s.setEncoding("utf8");
         s.setTimeout(timeout);
         s.on("connect", () => s.write(encodeRequest({ op, ...args })));
@@ -139,11 +146,12 @@ export function createDaemonCallOnce(socketPath: string = DEFAULT_DAEMON_SOCKET)
             buf += d;
             if (buf.endsWith("\n")) {
                 s.end();
-                resolve(parseReply(buf));
+                done(parseReply(buf));
             }
         });
-        s.on("timeout", () => { s.destroy(); resolve(null); });
-        s.on("error", () => resolve(null));
+        s.on("timeout", () => { s.destroy(); done(null); });
+        s.on("error", () => done(null));
+        s.on("close", () => done(null));
     });
 }
 

@@ -168,6 +168,7 @@ static long pswmi_ioctl_info(struct pswmi_info __user *ui)
 	struct pswmi_info info = { 0 };
 	int i;
 
+	mutex_lock(&pswmi_lock);
 	for (i = 0; i < PSWMI_GUID_MAX; i++) {
 		if (pswmi_devs[i].bound) {
 			info.bound_mask |= BIT(i);
@@ -176,6 +177,7 @@ static long pswmi_ioctl_info(struct pswmi_info __user *ui)
 					wmidev_instance_count(pswmi_devs[i].wdev);
 		}
 	}
+	mutex_unlock(&pswmi_lock);
 
 	return copy_to_user(ui, &info, sizeof(info)) ? -EFAULT : 0;
 }
@@ -223,6 +225,12 @@ static long pswmi_ioctl_eval(struct pswmi_eval __user *uarg)
 	 */
 
 	mutex_lock(&pswmi_lock);
+
+	if (!pswmi_devs[slot].bound || !pswmi_devs[slot].wdev) {
+		mutex_unlock(&pswmi_lock);
+		kfree(inbuf);
+		return -ENODEV;
+	}
 
 	/* honor the vendor's >=30 ms firmware pacing across all callers */
 	{

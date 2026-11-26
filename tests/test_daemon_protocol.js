@@ -145,6 +145,23 @@ test("discriminators: error-key presence + busy regex", () => {
     assert.strictEqual(protocol.isBusyError({ error: "unknown op 'x'" }), false);
 });
 
+test("T6: clean EOF without newline resolves null immediately", async () => {
+    const sockPath = pathMod.join(osMod.tmpdir(), `psense-proto-${process.pid}-eof.sock`);
+    fsMod.rmSync(sockPath, { force: true });
+    const { server } = makeMockDaemon(sockPath);
+    await new Promise((res) => server.listen(sockPath, res));
+    try {
+        const callOnce = protocol.createDaemonCallOnce(sockPath);
+        const t0 = Date.now();
+        const reply = await callOnce("unknown.empty.close", {}, 4000);
+        assert.strictEqual(reply, null, "empty close must resolve null");
+        assert.ok(Date.now() - t0 < 1000, "must resolve immediately instead of waiting for timeout");
+    } finally {
+        server.close();
+        fsMod.rmSync(sockPath, { force: true });
+    }
+});
+
 test("wire helpers: encode/parse round trip and safety", () => {
     const line = protocol.encodeRequest({ op: "sensors" });
     assert.strictEqual(line, '{"op":"sensors"}\n');

@@ -96,15 +96,18 @@ function daemonCallOnce(op, args, timeout = 6000) {
     return new Promise((resolve) => {
         const s = nnode.createConnection("/run/psense.sock");
         let buf = "";
+        let settled = false;
+        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
         s.setEncoding("utf8");
         s.setTimeout(timeout);
         s.on("connect", () => s.write(JSON.stringify({ op, ...args }) + "\n"));
         s.on("data", (d) => {
             buf += d;
-            if (buf.endsWith("\n")) { s.end(); try { resolve(JSON.parse(buf)); } catch { resolve(null); } }
+            if (buf.endsWith("\n")) { s.end(); try { done(JSON.parse(buf)); } catch { done(null); } }
         });
-        s.on("timeout", () => { s.destroy(); resolve(null); });
-        s.on("error", () => resolve(null));
+        s.on("timeout", () => { s.destroy(); done(null); });
+        s.on("error", () => done(null));
+        s.on("close", () => done(null));
     });
 }
 async function daemonCall(op, args, timeout = 6000) {
@@ -823,21 +826,41 @@ const HANDLERS = {
         openCameraSettings: () => {
             log("openCameraSettings invoked");
             try {
-                const { exec } = require("child_process");
-                exec("snapshot || cheese || kamoso || true", (err) => {
-                    if (err) log("openCameraSettings launch error:", err.message);
-                });
+                const { exec, spawn } = require("child_process");
+                const nvBroadcastBin = path.join(__dirname, "../nv-broadcast/nv-broadcast");
+                if (fs.existsSync(nvBroadcastBin)) {
+                    const child = spawn(nvBroadcastBin, ["gui", "--tab", "camera"], {
+                        detached: true,
+                        stdio: "ignore",
+                    });
+                    child.on("error", (err) => log("openCameraSettings nv-broadcast error:", err.message));
+                    child.unref();
+                } else {
+                    exec("nv-broadcast gui --tab camera || snapshot || cheese || kamoso || true", (err) => {
+                        if (err) log("openCameraSettings launch error:", err.message);
+                    });
+                }
             } catch (e) { log("openCameraSettings failed:", e.message); }
             return null;
         },
         openPurifiedVoice: () => {
             log("openPurifiedVoice invoked");
             try {
-                const { exec } = require("child_process");
-                const scriptPath = path.join(__dirname, "../../scripts/psense-purified-voice.sh");
-                exec(`psense-purified-voice || bash "${scriptPath}" || pavucontrol || true`, (err) => {
-                    if (err) log("openPurifiedVoice launch error:", err.message);
-                });
+                const { exec, spawn } = require("child_process");
+                const nvBroadcastBin = path.join(__dirname, "../nv-broadcast/nv-broadcast");
+                if (fs.existsSync(nvBroadcastBin)) {
+                    const child = spawn(nvBroadcastBin, ["gui", "--tab", "mic"], {
+                        detached: true,
+                        stdio: "ignore",
+                    });
+                    child.on("error", (err) => log("openPurifiedVoice nv-broadcast error:", err.message));
+                    child.unref();
+                } else {
+                    const scriptPath = path.join(__dirname, "../../scripts/psense-purified-voice.sh");
+                    exec(`nv-broadcast gui --tab mic || psense-purified-voice || bash "${scriptPath}" || pavucontrol || true`, (err) => {
+                        if (err) log("openPurifiedVoice launch error:", err.message);
+                    });
+                }
             } catch (e) { log("openPurifiedVoice failed:", e.message); }
             return null;
         },
@@ -1024,7 +1047,7 @@ const HANDLERS = {
                 return [{ cpu_name: name, cpu_max_frequency: Math.round(kHz / 1000) }];
             } catch { return [{ cpu_name: "", cpu_max_frequency: 0 }]; }
         },
-        getSupportGPUInfo: () => [gpuNameEntry()],
+        getSupportGPUInfo: () => gpuNameEntry(),
         // fan descriptor list (their fanDailsControl.data[i].fan_name consumers)
         getSupportFanControl: () => [
             { fan_index: 0, fan_name: "CPU" },
@@ -1726,9 +1749,10 @@ async function applyLightingEntry(src) {
             log("zone palette unchanged — skipped (no WMI evals)");
         if (!zones.length) kbZonePalette.clear();
     } else {
-        // Animated mode active: clear zone palette cache so returning to STATIC
-        // always restores per-zone hardware colors.
+        // Animated mode active: clear zone palette and static frame caches so
+        // returning to STATIC always restores per-zone hardware colors and brightness.
         kbZonePalette.clear();
+        kbFrameSig = null;
         const zoneCount = (Array.isArray(src.LEDs) && src.LEDs.length) ? src.LEDs.length : 4;
         if (DAEMON_MATH_EFFECTS.has(eff)) {
             lightingEngine.stopEffect();
@@ -1860,7 +1884,7 @@ function xdgApps() {
     }
     // dedupe by id (user dir wins – parsing order: user dirs last)
     const seen = new Map();
-    for (const a of out) if (!seen.has(a.id)) seen.set(a.id, a);
+    for (const a of out) seen.set(a.id, a);
     const apps = [...seen.values()].sort((a, b) => a.display.localeCompare(b.display));
     _xdgCache = { t: Date.now(), a: apps };
     return apps;

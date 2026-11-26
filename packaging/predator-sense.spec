@@ -135,7 +135,7 @@ install -Dm644 src/psense-wmi/psense-wmi.ko \
 
 # ---------- GUI payload (bundled Electron + renderer) ----------
 mkdir -p %{buildroot}%{appdir}
-for item in app backend.js main.js preload.js lighting-engine.js ddsc-table.json tls \
+for item in app backend.js main.js preload.js lighting-engine.js daemon-protocol.js ddsc-table.json tls \
             package.json package-lock.json bun.lock node_modules; do
     cp -a src/psense-electron/$item %{buildroot}%{appdir}/
 done
